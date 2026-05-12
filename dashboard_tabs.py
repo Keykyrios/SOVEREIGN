@@ -466,7 +466,7 @@ class CrisisTab(QWidget):
         self.pc.setYRange(0, 1)
         layout.addWidget(self.pc, 1, 0, 1, 6)
 
-        self.alert = QLabel('● WAITING FOR ENGINE DATA')
+        self.alert = QLabel('[WAITING] ENGINE DATA')
         self.alert.setStyleSheet(f'color:#667788;font-size:15px;font-weight:bold;')
         self.alert.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self.alert, 2, 0, 1, 6)
@@ -521,11 +521,11 @@ class CrisisTab(QWidget):
         # Endogenous crisis score — purely from engine data
         score = (1 - fiedler) * 0.35 + min(max_ru, 1) * 0.4 + min(tri / 10, 1) * 0.25
         if score > 0.65:
-            self.alert.setText('⚠  ENDOGENOUS PHASE TRANSITION DETECTED')
+            self.alert.setText('[CRITICAL] ENDOGENOUS PHASE TRANSITION DETECTED')
             self.alert.setStyleSheet(f'color:{WARN};font-size:15px;font-weight:bold;')
         elif score > 0.35:
-            self.alert.setText('⚡  STRESSED — Liquidity Crisis Forming')
+            self.alert.setText('[WARNING] STRESSED — Liquidity Crisis Forming')
             self.alert.setStyleSheet(f'color:{ACCENT2};font-size:15px;font-weight:bold;')
         elif d.snap:
-            self.alert.setText('●  STABLE — Monitoring Engine Output')
+            self.alert.setText('[STABLE] Monitoring Engine Output')
             self.alert.setStyleSheet(f'color:{ACCENT3};font-size:15px;font-weight:bold;')
