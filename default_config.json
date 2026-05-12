@@ -1,0 +1,98 @@
+{
+  "_comment": "SOVEREIGN simulation config. All parameters loaded from this file — nothing hardcoded.",
+
+  "universe": {
+    "n_assets": 50,
+    "initial_prices": []
+  },
+
+  "dt": 0.0005,
+  "T": 5.0,
+  "seed": 42,
+
+  "rough_vol": {
+    "H": 0.1,
+    "H_min": 0.05,
+    "H_max": 0.45,
+    "eta": 1.9,
+    "rho": -0.7,
+    "xi0": 0.04,
+    "kappa_H": 0.5,
+    "theta_H": 0.1,
+    "sigma_H": 0.05
+  },
+
+  "levy": {
+    "C": 1.0,
+    "G": 5.0,
+    "M": 5.0,
+    "Y": 0.5,
+    "kappa_cir": 0.5,
+    "theta_cir": 1.0,
+    "sigma_cir": 0.3,
+    "subordinator_scale": 0.01
+  },
+
+  "regime": {
+    "n_regimes": 5,
+    "base_transition_rate": 0.1,
+    "hawkes_sensitivity": 0.3
+  },
+
+  "hawkes": {
+    "n_order_types": 3,
+    "n_depth_levels": 5,
+    "base_intensity": 5.0,
+    "alpha_self": 0.4,
+    "alpha_cross": 0.05,
+    "beta": 2.0,
+    "epsilon": 0.5,
+    "max_spectral_radius": 0.8,
+    "dykstra_max_iter": 100
+  },
+
+  "lob": {
+    "n_levels": 20,
+    "tick_size": 0.01,
+    "queue_decay_rate": 0.5,
+    "iceberg_fraction": 0.3,
+    "market_impact_alpha": 0.1,
+    "cancel_rate": 2.0
+  },
+
+  "market_maker": {
+    "gamma": 0.1,
+    "kappa_ambiguity": 0.5,
+    "A": 1.0,
+    "k": 1.5,
+    "max_inventory": 100.0,
+    "n_hjb_grid": 50,
+    "hjb_dt": 0.01
+  },
+
+  "ruin": {
+    "initial_surplus": 1000.0,
+    "delta_discount": 0.05
+  },
+
+  "topology": {
+    "window": 100,
+    "rmt_threshold": 1.0,
+    "pmfg_enabled": true,
+    "contagion_rate": 0.1
+  },
+
+  "tda": {
+    "max_filtration": 2.0,
+    "n_landmarks": 20,
+    "n_landscape_points": 100,
+    "n_landscape_levels": 5
+  },
+
+  "mlmc": {
+    "n_levels": 4,
+    "base_samples": 200,
+    "geometric_factor": 2,
+    "target_rmse": 0.01
+  }
+}

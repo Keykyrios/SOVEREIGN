@@ -1,0 +1,12 @@
+build/
+sim_state.json*
+__pycache__/
+.vs/
+*.exe
+*.a
+*.obj
+*.pdf
+*.txt
+vcpkg/
+run_test.bat
+launch.bat
