@@ -2,6 +2,9 @@
   <h1>SOVEREIGN</h1>
   <h3>High-Frequency Microstructure, Actuarial Contagion, and Topological Data Analysis</h3>
   <br />
+  <strong>S.O.V.E.R.E.I.G.N.</strong><br/>
+  <em><strong>S</strong>tochastic <strong>O</strong>rder-flow <strong>V</strong>olatility <strong>E</strong>ngine for <strong>R</strong>isk <strong>E</strong>valuation & <strong>I</strong>nterconnected <strong>G</strong>raph <strong>N</strong>etworks</em>
+  <br /><br />
   <a href="https://drive.google.com/file/d/1KKBpKEfQiJph58u0bLJ2V7AA1c_fbWbE/view?usp=sharing"><strong>Read the Official Whitepaper (Mathematical Specification)</strong></a>
   <br /><br />
   <img src="https://img.shields.io/badge/C%2B%2B-20-00599C?style=for-the-badge&logo=c%2B%2B&logoColor=white" alt="C++20" />
