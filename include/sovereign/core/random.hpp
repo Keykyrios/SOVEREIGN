@@ -12,8 +12,11 @@
 namespace sovereign {
 
 /// Xoshiro256** — fast, high-quality PRNG (period 2^256-1)
-class Xoshiro256 {
+/// alignas(64) prevents false sharing when packed in std::vector for OpenMP
+class alignas(64) Xoshiro256 {
     uint64_t s_[4];
+    double spare_ = 0;
+    bool has_spare_ = false;
 
     static uint64_t rotl(uint64_t x, int k) { return (x << k) | (x >> (64 - k)); }
     static uint64_t splitmix64(uint64_t& state) {
@@ -44,11 +47,19 @@ public:
         return (next() >> 11) * 0x1.0p-53;
     }
 
-    /// Standard normal via Ziggurat
+    /// Standard normal via Box-Muller with cached spare (correct + fast)
     double normal() {
-        // Box-Muller (replaced with Ziggurat in production)
-        double u1 = uniform(), u2 = uniform();
-        return std::sqrt(-2.0 * std::log(u1 + 1e-300)) * std::cos(2.0 * M_PI * u2);
+        if (has_spare_) {
+            has_spare_ = false;
+            return spare_;
+        }
+        // Use 1-uniform() to get (0,1] — log is always finite
+        double u1 = 1.0 - uniform(), u2 = uniform();
+        double r = std::sqrt(-2.0 * std::log(u1));
+        double theta = 2.0 * M_PI * u2;
+        spare_ = r * std::sin(theta);
+        has_spare_ = true;
+        return r * std::cos(theta);
     }
 
     /// Fill vector with iid N(0,1)
@@ -65,8 +76,41 @@ public:
 
     /// Exponential(rate)
     double exponential(double rate) {
-        return -std::log(uniform() + 1e-300) / rate;
+        return -std::log(1.0 - uniform()) / rate;  // (0,1] domain for log
     }
+
+    /// Jump 2^128 steps — produces non-overlapping subsequences for
+    /// parallel threads. Standard polynomial from Vigna's reference impl.
+    void jump() {
+        static const uint64_t JUMP[] = {
+            0x180ec6d33cfd0abaULL, 0xd5a61266f0c9392cULL,
+            0xa9582618e03fc9aaULL, 0x39abdc4529b1661cULL
+        };
+        uint64_t s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+        for (int i = 0; i < 4; ++i) {
+            for (int b = 0; b < 64; ++b) {
+                if (JUMP[i] & (1ULL << b)) {
+                    s0 ^= s_[0]; s1 ^= s_[1];
+                    s2 ^= s_[2]; s3 ^= s_[3];
+                }
+                next();
+            }
+        }
+        s_[0] = s0; s_[1] = s1; s_[2] = s2; s_[3] = s3;
+    }
+
+    /// Create a thread-local RNG with guaranteed non-overlapping sequence
+    Xoshiro256 fork() {
+        Xoshiro256 child = *this;
+        child.has_spare_ = false;  // Kill spare contamination
+        child.spare_ = 0;
+        has_spare_ = false;  // Reset parent spare too — stale after jump
+        spare_ = 0;
+        jump();  // Advance parent past child's 2^128 block
+        return child;
+    }
+
+    const uint64_t* state() const { return s_; }
 };
 
 /// Cholesky-correlated normal vector: z = L * w where w ~ N(0,I)
@@ -144,6 +188,8 @@ public:
         dt_ = dt;
         kappa_ = kappa;
     }
+
+    double cached_H() const { return H_; }
 
     /// Evaluate the Volterra integral at step n using past W increments.
     /// dW[j] = W(t_{j+1}) - W(t_j), j = 0,...,n-1

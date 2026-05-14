@@ -16,7 +16,12 @@ struct Event {
     double size;
     bool   is_buy;
 
-    bool operator>(const Event& o) const { return time > o.time; }
+    uint64_t seq_id;
+
+    bool operator>(const Event& o) const { 
+        if (time == o.time) return seq_id > o.seq_id;
+        return time > o.time; 
+    }
 };
 
 class SimulationClock {
@@ -27,10 +32,21 @@ class SimulationClock {
 
     /// Priority queue for Hawkes-driven events (earliest first)
     std::priority_queue<Event, std::vector<Event>, std::greater<Event>> event_queue_;
+    uint64_t next_seq_id_ = 0;
 
 public:
-    SimulationClock() = default;
-    SimulationClock(double dt, double T) : dt_(dt), t_end_(T) {}
+    SimulationClock() { reserve_queue(); }
+    SimulationClock(double dt, double T) : dt_(dt), t_end_(T) { reserve_queue(); }
+
+private:
+    void reserve_queue() {
+        std::vector<Event> container;
+        container.reserve(100000);  // Pre-alloc for Hawkes avalanches
+        event_queue_ = std::priority_queue<Event, std::vector<Event>,
+            std::greater<Event>>(std::greater<Event>(), std::move(container));
+    }
+
+public:
 
     double t()       const { return t_; }
     double dt()      const { return dt_; }
@@ -42,7 +58,10 @@ public:
     void tick() { t_ += dt_; ++step_; }
 
     /// Schedule an asynchronous event
-    void schedule(const Event& e) { event_queue_.push(e); }
+    void schedule(Event e) { 
+        e.seq_id = next_seq_id_++;
+        event_queue_.push(e); 
+    }
 
     /// Check if there's a pending event before the next sync tick
     bool has_event_before_tick() const {
@@ -59,15 +78,15 @@ public:
     /// Number of pending events
     size_t pending_events() const { return event_queue_.size(); }
 
-    /// Drain all events up to time t_now + dt
-    std::vector<Event> drain_events() {
-        std::vector<Event> events;
+    /// Drain all events up to time t_now + dt into a pre-allocated buffer.
+    /// Caller must provide a reusable vector; clear() is O(1) amortized.
+    void drain_events(std::vector<Event>& buffer) {
+        buffer.clear();
         double deadline = t_ + dt_;
         while (!event_queue_.empty() && event_queue_.top().time < deadline) {
-            events.push_back(event_queue_.top());
+            buffer.push_back(event_queue_.top());
             event_queue_.pop();
         }
-        return events;
     }
 };
 

@@ -52,8 +52,8 @@ public:
             double rho = spectral_radius(Phi);
             if (rho <= rho_max_) return {iter, rho};
 
-            // Rescale: α ← α · (ρ_max / ρ)^{1+δ} (slight overshoot)
-            double scale = std::pow(rho_max_ / rho, 1.05);
+            // Rescale: α ← α · (ρ_max / ρ)
+            double scale = rho_max_ / rho;
             alpha_matrix *= scale;
         }
 
@@ -78,7 +78,8 @@ public:
         Eigen::MatrixXd q_inc = Eigen::MatrixXd::Zero(N, N);
 
         for (int iter = 0; iter < max_iter_; ++iter) {
-            Eigen::MatrixXd y = alpha_matrix + p_inc;
+            Eigen::MatrixXd old_y = alpha_matrix + p_inc;
+            Eigen::MatrixXd y = old_y;
 
             // Project onto C₁ (spectral radius constraint)
             Eigen::MatrixXd Phi(N, N);
@@ -89,16 +90,36 @@ public:
 
             double rho = spectral_radius(Phi);
             if (rho > rho_max_) {
-                double scale = rho_max_ / rho * 0.99;
-                y *= scale;
+                // Proper projection: eigendecompose, clip eigenvalues, reconstruct
+                Eigen::EigenSolver<Eigen::MatrixXd> solver(Phi);
+                Eigen::MatrixXcd V = solver.eigenvectors();
+                Eigen::VectorXcd evals = solver.eigenvalues();
+
+                // Clip eigenvalue magnitudes to rho_max
+                for (int k = 0; k < N; ++k) {
+                    double mag = std::abs(evals(k));
+                    if (mag > rho_max_) {
+                        evals(k) *= rho_max_ / mag;
+                    }
+                }
+
+                // Reconstruct: Phi_new = V · diag(evals_clipped) · V^{-1}
+                Eigen::MatrixXcd Phi_new = V * evals.asDiagonal() * V.inverse();
+                // Extract real part and map back to alpha
+                for (int i = 0; i < N; ++i)
+                    for (int j = 0; j < N; ++j) {
+                        double phi_new = std::max(Phi_new(i, j).real(), 0.0);
+                        y(i, j) = phi_new * (epsilon_matrix(i, j) + 1e-10)
+                                / (beta_matrix(i, j) + 1e-10);
+                    }
             }
-            p_inc = alpha_matrix + p_inc - y;
+            p_inc = old_y - y;
             alpha_matrix = y;
 
             // Project onto C₂ (non-negativity)
-            Eigen::MatrixXd z = alpha_matrix + q_inc;
-            z = z.cwiseMax(0.0);
-            q_inc = alpha_matrix + q_inc - z;
+            Eigen::MatrixXd old_z = alpha_matrix + q_inc;
+            Eigen::MatrixXd z = old_z.cwiseMax(0.0);
+            q_inc = old_z - z;
             alpha_matrix = z;
 
             // Check convergence

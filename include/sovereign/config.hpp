@@ -32,7 +32,7 @@ struct RoughVolConfig {
     double hurst_mean     = 0.10;   ///< H̄ for stochastic Hurst OU
     double hurst_kappa    = 2.0;    ///< κ_H mean-reversion speed
     double hurst_sigma    = 0.50;   ///< σ_H diffusion of H(t) (increased for visual dynamics)
-    double eta            = 1.9;    ///< Vol-of-vol (rBergomi)
+    double eta            = 0.35;   ///< Vol-of-vol (rBergomi, calibrated range 0.2–0.5)
     double rho            = -0.90;  ///< Spot-vol correlation
     double xi_0           = 0.04;   ///< Forward variance ξ₀(t)
     int    n_hybrid_steps = 1;      ///< κ: power cells in hybrid scheme
@@ -126,7 +126,7 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(RuinConfig,
 // ─── Layer 6: Topology ─────────────────────────────────────────────────
 
 struct TopologyConfig {
-    double ewma_alpha           = 0.02;
+    double ewma_alpha           = 0.005;  ///< Effective memory ~400 ticks (balanced)
     double rmt_ratio            = 2.0;   ///< Q = T/N for Marčenko-Pastur
     int    spd_max_iter         = 50;
     bool   pmfg_enabled         = true;

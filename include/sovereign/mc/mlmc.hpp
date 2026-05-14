@@ -73,15 +73,16 @@ public:
         }
 
         // Phase 2: Optimal sample allocation (Giles Theorem 3.1)
-        // N_l ∝ √(V_l / h_l) / Σ_k √(V_k · h_k)
+        // N_l ∝ √(V_l / C_l) Σ_k √(V_k · C_k)
+        // Cost C_l ∝ 1/h_l => N_l ∝ √(V_l · h_l) Σ_k √(V_k / h_k)
         double eps = cfg_.target_rmse;
-        double sum_sqrt_Vh = 0;
+        double sum_sqrt_V_div_h = 0;
         for (int l = 0; l < L; ++l)
-            sum_sqrt_Vh += std::sqrt(levels[l].variance * levels[l].h);
+            sum_sqrt_V_div_h += std::sqrt(levels[l].variance / levels[l].h);
 
         for (int l = 0; l < L; ++l) {
-            double N_opt = (2.0 / (eps * eps)) * sum_sqrt_Vh
-                         * std::sqrt(levels[l].variance / levels[l].h);
+            double N_opt = (2.0 / (eps * eps)) * sum_sqrt_V_div_h
+                         * std::sqrt(levels[l].variance * levels[l].h);
             int N_target = std::max(static_cast<int>(std::ceil(N_opt)),
                                      levels[l].n_samples);
 

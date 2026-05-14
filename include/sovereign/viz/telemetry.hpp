@@ -4,144 +4,150 @@
 /// All data comes directly from SimulationState — nothing synthesized.
 
 #include <sovereign/core/state.hpp>
-#include <nlohmann/json.hpp>
-#include <fstream>
+#include <boost/asio.hpp>
+#include <sstream>
 #include <string>
-#include <cstdio>
+#include <thread>
+#include <chrono>
 
 namespace sovereign {
 
 class TelemetryWriter {
-    std::string path_;
     int flush_interval_;
     int n_assets_;
-    int lob_export_levels_;  ///< How many LOB levels to export (keep manageable)
+    int lob_export_levels_;
+    std::future<void> write_future_;
+    boost::asio::io_context io_context_;
+    boost::asio::ip::udp::socket socket_;
+    boost::asio::ip::udp::endpoint endpoint_;
 
 public:
     TelemetryWriter(const std::string& path, int n_assets,
                     int flush_interval = 10, int lob_levels = 20)
-        : path_(path), flush_interval_(flush_interval),
-          n_assets_(n_assets), lob_export_levels_(lob_levels)
+        : flush_interval_(flush_interval),
+          n_assets_(n_assets), lob_export_levels_(lob_levels),
+          socket_(io_context_, boost::asio::ip::udp::endpoint(boost::asio::ip::udp::v4(), 0)),
+          endpoint_(boost::asio::ip::address::from_string("127.0.0.1"), 8080)
     {
-        std::ofstream f(path_);
-        f << "{}";
+    }
+
+    ~TelemetryWriter() {
+        if (write_future_.valid()) write_future_.wait();
     }
 
     void write(const SimulationState& state) {
         if (state.step % flush_interval_ != 0) return;
 
-        nlohmann::json snap;
+        if (write_future_.valid() && write_future_.wait_for(std::chrono::seconds(0)) != std::future_status::ready) {
+            return;
+        }
 
-        // ── Simulation clock ─────────────────────────────────────────────
-        snap["step"]         = state.step;
-        snap["t"]            = state.t;
-        snap["total_events"] = state.total_events;
-        snap["wall_clock_s"] = state.wall_clock_s;
+        // Direct string construction to avoid nlohmann::json AST overhead
+        std::ostringstream ss;
+        ss.precision(6);
+        ss << std::fixed;
 
-        // ── Per-asset state (full) ────────────────────────────────────────
+        ss << "{";
+        ss << "\"step\":" << state.step << ",";
+        ss << "\"t\":" << state.t << ",";
+        ss << "\"total_events\":" << state.total_events << ",";
+        ss << "\"wall_clock_s\":" << state.wall_clock_s << ",";
+
+        ss << "\"assets\":[";
         for (int i = 0; i < n_assets_; ++i) {
             const auto& a = state.assets[i];
+            ss << "{";
+            ss << "\"id\":" << a.id << ",";
+            ss << "\"price\":" << a.price << ",";
+            ss << "\"log_price\":" << a.log_price << ",";
+            ss << "\"vol\":" << a.volatility << ",";
+            ss << "\"variance\":" << a.variance << ",";
+            ss << "\"hurst\":" << a.hurst << ",";
+            ss << "\"jump\":" << a.jump_component << ",";
+            ss << "\"lob_impact\":" << a.lob_impact << ",";
+            ss << "\"regime\":" << a.regime << ",";
+            ss << "\"return1\":" << a.return_1 << ",";
+            ss << "\"cum_ret\":" << a.cum_return << ",";
 
-            auto& ai = snap["assets"][i];
-
-            // Layer 1: Price process
-            ai["id"]        = a.id;
-            ai["price"]     = a.price;
-            ai["log_price"] = a.log_price;
-            ai["vol"]       = a.volatility;
-            ai["variance"]  = a.variance;
-            ai["hurst"]     = a.hurst;
-            ai["jump"]      = a.jump_component;
-            ai["lob_impact"]= a.lob_impact;
-            ai["regime"]    = a.regime;
-            ai["return1"]   = a.return_1;
-            ai["cum_ret"]   = a.cum_return;
-
-            // Layer 2: Hawkes intensities (all K*D values)
-            auto& hi = ai["hawkes_intensity"];
-            for (int k = 0; k < (int)a.hawkes_intensity.size(); ++k)
-                hi[k] = a.hawkes_intensity(k);
-
-            // Layer 3: LOB (top lob_export_levels_ levels)
-            int L = std::min(lob_export_levels_,
-                             (int)a.lob.bid_volumes.size());
-            auto& lob = ai["lob"];
-            for (int d = 0; d < L; ++d) {
-                lob["bid_vol"][d]   = a.lob.bid_volumes(d);
-                lob["ask_vol"][d]   = a.lob.ask_volumes(d);
-                lob["bid_price"][d] = a.lob.bid_prices(d);
-                lob["ask_price"][d] = a.lob.ask_prices(d);
+            ss << "\"hawkes_intensity\":[";
+            for (int k = 0; k < (int)a.hawkes_intensity.size(); ++k) {
+                ss << a.hawkes_intensity(k) << (k == a.hawkes_intensity.size()-1 ? "" : ",");
             }
-            lob["best_bid"]  = a.lob.best_bid;
-            lob["best_ask"]  = a.lob.best_ask;
-            lob["mid_price"] = a.lob.mid_price;
-            lob["spread"]    = a.lob.spread;
-            lob["imbalance"] = a.lob.imbalance();
-            lob["microprice"]= a.lob.microprice();
+            ss << "],";
 
-            // Layer 4: Market maker
-            ai["mm_spread"]    = a.mm_spread;
-            ai["mm_inventory"] = a.mm_inventory;
-            ai["mm_value"]     = a.mm_value;
+            int L = std::min(lob_export_levels_, (int)a.lob.bid_volumes.size());
+            ss << "\"lob\":{";
+            auto print_vec = [&](const std::string& name, const auto& v) {
+                ss << "\"" << name << "\":[";
+                for (int d = 0; d < L; ++d) ss << v(d) << (d == L-1 ? "" : ",");
+                ss << "],";
+            };
+            print_vec("bid_vol", a.lob.bid_volumes);
+            print_vec("ask_vol", a.lob.ask_volumes);
+            print_vec("bid_price", a.lob.bid_prices);
+            print_vec("ask_price", a.lob.ask_prices);
+            
+            ss << "\"best_bid\":" << a.lob.best_bid << ",";
+            ss << "\"best_ask\":" << a.lob.best_ask << ",";
+            ss << "\"mid_price\":" << a.lob.mid_price << ",";
+            ss << "\"spread\":" << a.lob.spread << ",";
+            ss << "\"imbalance\":" << a.lob.imbalance() << ",";
+            ss << "\"microprice\":" << a.lob.microprice();
+            ss << "},";
 
-            // Layer 5: Ruin
-            ai["surplus"]    = a.surplus;
-            ai["ruin"]       = a.ruin_prob;
-            ai["gerber_shiu"]= a.gerber_shiu;
+            ss << "\"mm_spread\":" << a.mm_spread << ",";
+            ss << "\"mm_inventory\":" << a.mm_inventory << ",";
+            ss << "\"mm_value\":" << a.mm_value << ",";
+            ss << "\"surplus\":" << a.surplus << ",";
+            ss << "\"ruin\":" << a.ruin_prob << ",";
+            ss << "\"gerber_shiu\":" << a.gerber_shiu;
+            ss << "}" << (i == n_assets_-1 ? "" : ",");
         }
+        ss << "],";
 
-        // ── Cross-asset: Layer 6 ─────────────────────────────────────────
-        // Full correlation matrix (flattened row-major)
-        {
-            auto& c = snap["correlation"];
-            int idx = 0;
-            for (int i = 0; i < n_assets_; ++i)
-                for (int j = 0; j < n_assets_; ++j)
-                    c[idx++] = state.correlation(i, j);
-        }
-        {
-            auto& c = snap["raw_correlation"];
-            int idx = 0;
-            for (int i = 0; i < n_assets_; ++i)
-                for (int j = 0; j < n_assets_; ++j)
-                    c[idx++] = state.raw_correlation(i, j);
-        }
-        // Eigenvalues
-        for (int i = 0; i < n_assets_; ++i)
-            snap["eigenvalues"][i] = state.eigenvalues(i);
+        auto print_mat = [&](const std::string& name, const Eigen::MatrixXd& m) {
+            ss << "\"" << name << "\":[";
+            int idx = 0; int total = m.rows() * m.cols();
+            for (int i = 0; i < m.rows(); ++i) {
+                for (int j = 0; j < m.cols(); ++j) {
+                    ss << m(i, j) << (++idx == total ? "" : ",");
+                }
+            }
+            ss << "],";
+        };
+        auto print_vec_field = [&](const std::string& name, const Eigen::VectorXd& v) {
+            ss << "\"" << name << "\":[";
+            for (int i = 0; i < v.size(); ++i) ss << v(i) << (i == v.size()-1 ? "" : ",");
+            ss << "],";
+        };
 
-        // Graph metrics
-        snap["fiedler"]    = state.fiedler_value;
-        snap["clustering"] = state.clustering_coeff;
-        for (int i = 0; i < n_assets_; ++i) {
-            snap["betweenness"][i] = state.betweenness(i);
-            snap["degree"][i]      = state.degree(i);
-        }
+        print_mat("correlation", state.correlation);
+        print_mat("raw_correlation", state.raw_correlation);
+        print_vec_field("eigenvalues", state.eigenvalues);
 
-        // ── Cross-asset: Layer 7 TDA ─────────────────────────────────────
-        snap["tri"]         = state.tda_risk_index;
-        snap["wasserstein"] = state.wasserstein_dist;
-        snap["l1"]          = state.landscape_l1;
-        snap["l2"]          = state.landscape_l2;
+        ss << "\"fiedler\":" << state.fiedler_value << ",";
+        ss << "\"clustering\":" << state.clustering_coeff << ",";
+        print_vec_field("betweenness", state.betweenness);
+        print_vec_field("degree", state.degree);
 
-        // ── Ruin vector ──────────────────────────────────────────────────
-        for (int i = 0; i < n_assets_; ++i)
-            snap["ruin_vector"][i] = state.ruin_vector(i);
+        ss << "\"tri\":" << state.tda_risk_index << ",";
+        ss << "\"wasserstein\":" << state.wasserstein_dist << ",";
+        ss << "\"l1\":" << state.landscape_l1 << ",";
+        ss << "\"l2\":" << state.landscape_l2 << ",";
+        print_vec_field("ruin_vector", state.ruin_vector);
+        print_mat("distance", state.distance);
+        
+        // Remove trailing comma from last print_mat
+        ss.seekp(-1, std::ios_base::end);
+        ss << "}";
 
-        // ── Distance matrix ──────────────────────────────────────────────
-        {
-            auto& d = snap["distance"];
-            int idx = 0;
-            for (int i = 0; i < n_assets_; ++i)
-                for (int j = 0; j < n_assets_; ++j)
-                    d[idx++] = state.distance(i, j);
-        }
-
-        // Direct write — simple and works on all platforms
-        std::ofstream f(path_, std::ios::trunc);
-        if (f.is_open()) {
-            f << snap.dump(-1);
-        }
+        // Send over UDP asynchronously
+        std::string payload = ss.str();
+        write_future_ = std::async(std::launch::async, [this, payload]() {
+            try {
+                socket_.send_to(boost::asio::buffer(payload), endpoint_);
+            } catch (...) {}
+        });
     }
 };
 

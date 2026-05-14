@@ -10,3 +10,5 @@ __pycache__/
 vcpkg/
 run_test.bat
 launch.bat
+*.tex
+*.json

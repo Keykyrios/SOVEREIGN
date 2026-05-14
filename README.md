@@ -2,8 +2,8 @@
   <h1>SOVEREIGN</h1>
   <h3>High-Frequency Microstructure, Actuarial Contagion, and Topological Data Analysis</h3>
   <br />
-  <strong>S.O.V.E.R.E.I.G.N.</strong><br/>
-  <em><strong>S</strong>tochastic <strong>O</strong>rder-flow <strong>V</strong>olatility <strong>E</strong>ngine for <strong>R</strong>isk <strong>E</strong>valuation & <strong>I</strong>nterconnected <strong>G</strong>raph <strong>N</strong>etworks</em>
+  <strong>S. O. V. E. R. E. I. G. N.</strong><br/>
+  <em><strong>S</strong>tochastic <strong>O</strong>rder-driven <strong>V</strong>olatility <strong>E</strong>ngine with <strong>R</strong>ecursive <strong>E</strong>ndogenous <strong>I</strong>nstability, <strong>G</strong>enerated <strong>N</strong>umerically</em>
   <br /><br />
   <a href="https://drive.google.com/file/d/1KKBpKEfQiJph58u0bLJ2V7AA1c_fbWbE/view?usp=sharing"><strong>Read the Official Whitepaper (Mathematical Specification)</strong></a>
   <br /><br />
@@ -21,100 +21,156 @@
 
 ## Overview
 
-**SOVEREIGN** is a hyper-performance, multi-asset market microstructure simulation engine written in **C++20** with an asynchronous **OpenGL PyQtGraph** telemetry dashboard. 
+**SOVEREIGN** is a high-performance, production-grade multi-asset market microstructure simulation engine written in **C++20** with an asynchronous **OpenGL PyQtGraph** telemetry dashboard. 
 
-Unlike standard monte-carlo diffusions that rely on exogenous shocks to trigger crashes, SOVEREIGN is an **endogenous thermodynamic closed-loop system**. It mathematically guarantees spontaneous flash crashes by dynamically mapping the algebraic topology (shape) of the market directly to the risk-aversion of automated liquidity providers.
+Unlike standard Monte Carlo diffusions that rely on exogenous shock generators to trigger crashes, SOVEREIGN is built to act as an **endogenous closed-loop thermodynamic system**. The engine studies how flash crashes emerge organically and inevitably from the strict mathematical interplay of rough stochastic volatility, self-exciting Hawkes order flow avalanches, and market maker robust control under Knightian ambiguity.
 
-The engine accurately models high-frequency algorithmic trading physics, executing millions of events per second bypassing standard L1 cache bottlenecks via SIMD and cache-coherent ring buffers.
+⚠️ **Disclaimer: Pragmatic Architecture over Theoretical Purity**  
+While the theoretical foundations of SOVEREIGN are built on rigorous continuous-time stochastic calculus, the actual C++ implementation takes severe, calculated mathematical shortcuts to achieve real-time 60 FPS rendering. The codebase explicitly favors memory safety, cache locality, and sub-millisecond execution over theoretical perfection. This README documents the *actual* implemented architecture.
 
 ---
 
 ## The 7-Layer Feedback Architecture
 
-The simulation is built on an interconnected 7-layer pipeline where topological invariants feedback directly into the Limit Order Book via a Robust HJB Control PDE.
-
 ```mermaid
 graph TD
-    sublayer_1[Layer 1: Stochastic Vol \& Jumps]
-    sublayer_2[Layer 2: Hawkes Order Flow]
-    sublayer_3[Layer 3: Limit Order Book]
-    sublayer_4[Layer 4: Robust Control]
-    sublayer_5[Layer 5: Gerber-Shiu Ruin]
-    sublayer_6[Layer 6: Spectral Contagion]
-    sublayer_7[Layer 7: Persistent Homology]
+    L1[Layer 1: Rough Bergomi + CGMY Jumps]
+    L2[Layer 2: Hawkes Order Flow]
+    L3[Layer 3: Limit Order Book Microstructure]
+    L4[Layer 4: Robust HJB Control]
+    L5[Layer 5: Gerber-Shiu Ruin Analysis]
+    L6[Layer 6: Spectral Contagion & RMT]
+    L7[Layer 7: Persistent Homology TDA]
 
-    %% Dependencies
-    sublayer_1 -->|Volterra fBm & CGMY Jumps| sublayer_3
-    sublayer_2 -->|Poisson Mutually-Exciting Orders| sublayer_3
-    
-    sublayer_3 -->|Tick Data| sublayer_6
-    sublayer_3 -->|Adverse Selection Claims| sublayer_5
-    
-    sublayer_5 -->|Bankruptcy Vacuum| sublayer_2
-    
-    sublayer_6 -->|Marchenko-Pastur Metric Space| sublayer_7
-    
-    sublayer_7 -->|Topological Risk Index| sublayer_4
-    
-    sublayer_4 -->|Knightian Ambiguity Spreads| sublayer_3
-    
+    L1 -->|Volterra fBm & Diffusive Envelope| L3
+    L2 -->|Mutually-Exciting Orders| L3
+    L3 -->|Walkthrough Stress Claims| L5
+    L3 -->|Gaussian Blur Price Impact| L1
+    L5 -->|Ruin Probability Boost| L2
+    L6 -->|MP-Cleaned Metric Space| L7
+    L7 -->|Topological Risk Index| L4
+    L4 -->|Knightian Ambiguity Spreads| L3
+    L6 -->|Graph Laplacian Contagion| L5
+
     classDef core fill:#0b192c,stroke:#3b82f6,stroke-width:2px,color:#fff;
-    class sublayer_1,sublayer_2,sublayer_3,sublayer_4,sublayer_5,sublayer_6,sublayer_7 core;
+    class L1,L2,L3,L4,L5,L6,L7 core;
 ```
 
-### 1. Rough Bergomi & CGMY Jumps (Layer 1)
-Discards standard Itô diffusions. The volatility surface is driven by a fractional Volterra integral computed via the Bennedsen Hybrid Scheme ($O(N)$ with ring buffers). Heavy-tailed microstructure discontinuities are generated using rejection-sampled CGMY tempered stable Pareto distributions. The Box-Muller transform is completely bypassed using the hardware-accelerated **Ziggurat Algorithm** for normal distributions.
+### Layer 1: Rough Bergomi & CGMY Jumps (The Macro Envelope)
+- **Volterra fBm**: Riemann-Liouville fractional integration with power-cell singularity smoothing, generating long-memory volatility clusters. Note: The codebase retains "ghost" legacy code for a Bennedsen-Lunde-Pakkanen Hybrid Scheme, though it is not active in the hot path.
+- **CGMY Infinite-Activity Jumps**: CIR-subordinated tempered stable Lévy jumps via exact rejection sampling.
+- **Box-Muller RNG**: Despite theoretical claims of using the Ziggurat algorithm, the C++ engine utilizes standard Box-Muller paired with a custom `Xoshiro256**` generator and cached spare floats to maintain SIMD-like throughput.
 
-### 2. Multivariate Hawkes Processes (Layer 2)
-Order flow is not constant; it is heavily autocorrelated. SOVEREIGN simulates 6 distinct event types using a mutually-exciting $6 \times 6$ point process matrix. The engine utilizes an $O(N)$ recursive **Ogata Thinning algorithm**, managing sub-millisecond concurrency by pushing events into an `std::priority_queue` EventClock.
+### Layer 2: Multivariate Hawkes Processes (The Micro Flow)
+- **5-Dimensional Order Matrix**: Tracks `market`, `limit`, `cancel`, `modify`, and `hidden` events (initialized via a homogeneous "blank slate" ignoring asset heterogeneity).
+- **Uniform Exponential Weights**: While aiming for power-law kernels, the engine applies uniform scaling to its 10-component exponential sum, degrading the strict long-memory reflexivity.
+- **Ogata Thinning & Caps**: The $O(N)$ recursive intensity formulation is capped by a strict 1000-event limit per tick. If avalanches exceed this (as they should in flash crashes), the engine artificially truncates them to prevent CPU hanging.
 
-### 3. Limit Order Book (Layer 3)
-The absolute ground-truth state. To avoid L1 cache misses associated with `std::map`, the book uses discrete integer price grids mapped directly to `Eigen::VectorXd` contiguous arrays. Massive market orders execute using an implicit propagator to enforce the empirical **Square-Root Law of Price Impact**.
+### Layer 3: Limit Order Book (LOB) Microstructure (The Friction)
+- **Data-Oriented Design (DOD)**: Complete eradication of pointers. The LOB is an integer-indexed contiguous `Eigen::VectorXd` array allowing $O(1)$ mutation.
+- **Continuous Float Drift**: The theoretical "zero float drift" claim is false. The mid-price is derived via a double float Ornstein-Uhlenbeck drift applied synchronously.
+- **Gaussian Blur Impact**: True Square-Root concave impact is bypassed. When extreme market orders hit, the engine applies a static Gaussian blur to the bid-ask imbalance and pipes it to the log-price envelope as continuous drift.
+- **Passive Decay Hack**: Bulk order cancellation is simulated by a synchronous loop slashing 1% of the book volume, bypassing the strict sub-millisecond priority queue.
 
-### 4. Market Maker Robust Control (Layer 4)
-Market Makers solve a Robust Hamilton-Jacobi-Bellman (HJB) Equation under **Knightian Ambiguity**. They do not trust the reference probability measure, penalizing models via Kullback-Leibler Relative Entropy. 
+### Layer 4: Robust Market Maker Control (The Algorithms)
+- **Explicit Euler FTCS**: The Robust HJB PDE is solved via a brittle Forward-Time Central-Space Explicit Euler method, rather than CFL-safe implicit sub-stepping.
+- **Linear Heuristics**: The asymptotic spread formula drops logarithmic Poisson terms in favor of a crude linear inventory skew, which suffers from a dimensional bug (multiplied by $dt \approx 10^{-4}$).
+- **Ghost Market Makers**: The MM algorithms operate as parallel ghosts. They evaluate the grid blindly (ignoring LOB imbalance) and update their inventory via Bernoulli trials, never actually routing real limit orders into the LOB.
 
-### 5. Actuarial Ruin Analysis (Layer 5)
-A continuous-time Cramér-Lundberg risk process monitors Market Maker bankruptcy. Using a high-performance Picard Iteration finite-difference scheme over a 200-element grid, the engine computes the **Gerber-Shiu** expected discounted penalty function. Low-priced penny stocks mathematically violate the Net Profit Condition and inevitably collapse.
+### Layer 5: Actuarial Ruin Analysis (The Liquidation)
+- **Gerber-Shiu Picard Iteration**: Backward finite-difference solver to continuously extract Ruin Probability $\Psi(u)$ over a 200-element grid.
+- **Imaginary Premiums**: Premium collection assumes a hardcoded 200 fills/sec, completely disconnected from the real LOB execution rates.
+- **Bankruptcy Ghosts**: When $\Psi=1.0$, the MM algorithm "dies," widening future spreads. However, because MMs are ghosts, their existing liquidity is never physically flushed from the LOB.
+- **Walkthrough Threshold**: Ruin claims require a massive threshold (`> 10.0`) of LOB impact, meaning minor structural dislocations are ignored.
 
-### 6. Spectral Contagion \& Random Matrix Theory (Layer 6)
-An $O(N^2)$ recursive EWMA covariance state updates instantly on each tick using AVX2 SIMD fused-multiply-adds. The matrix is cleaned using **Marchenko-Pastur** limits (preserving the trace) and mapped to an ultrametric distance matrix. The **Fiedler Eigenvalue** of the Graph Laplacian signals absolute systemic contagion.
+### Layer 6: Spectral Contagion & Random Matrix Theory (The Network)
+- **Continuous EWMA Covariance**: Rank-1 outer product matrix state, vectorized via SIMD FMA.
+- **Marchenko-Pastur Clipping**: Trace-preserving eigenvalue cleaning.
+- **Graph Laplacian**: Evaluates the Fiedler eigenvalue ($\lambda_2$) for contagion detection, but skips the computationally expensive Fiedler eigenvector bisection.
+- **Greedy PMFG**: Instead of a rigorous Planar Maximally Filtered Graph (which requires complex Boyer-Myrvold planarity tests), the engine fakes it by building a Minimum Spanning Tree (MST) and greedily adding edges.
 
-### 7. Persistent Homology \& TDA (Layer 7)
-The engine constructs a **Vietoris-Rips Simplicial Complex** and executes Gaussian column reduction over $\mathbb{Z}_2$ boundary matrices using the Elder Rule. The $L_1$ Persistent Landscape explicitly maps the Betti-1 homology loops (market "holes") to a single Topological Risk Index (TRI).
-
-**The Closure:** The TRI is fed directly back into Layer 4. The topology terrifies the Market Makers $\to$ Spreads Widen $\to$ Liquidity Collapses $\to$ Hawkes Avalanches Destroy the Order Book. 
+### Layer 7: Persistent Homology TDA (The Shape of the Crash)
+- **Vietoris-Rips Simplicial Filtration**: Extraction of systemic topology from the ultrametric distance space.
+- **Homology Shortcuts**: The native engine abandons rigorous Galois Field $\mathbb{Z}_2$ boundary matrix reduction. Instead, it drops $H_2$ voids entirely and finds $H_1$ loops via a brute-force scan for geometric chordless 4-cycles.
+- **Greedy Wasserstein Metrics**: Tracking topological shifts utilizes an $O(n^2)$ greedy matching approach, arbitrarily dumping padded dummy points onto a single diagonal coordinate, distorting the metric space.
+- **Broken Death Spiral Loop**: The Topological Risk Index (TRI) is computed heuristically (not via $L_1$ landscape norm) and is solely for telemetry. The Knightian ambiguity parameter $\theta$ remains static, meaning the final macroscopic feedback loop is theoretically described but functionally disconnected in code.
 
 ---
 
-## Hardware & Software Stack
-*   **Math Engine**: C++20, GCC/MinGW64, AVX2 SIMD hardware instructions.
-*   **Linear Algebra**: `Eigen3` for vectorized matrix decomposition.
-*   **RNG**: Cache-coherent `Xoshiro256**` operating at 1.5 billion ops/sec.
-*   **Telemetry**: Asynchronous IPC via mapped JSON buffers.
-*   **Dashboard**: Python 3.10+, `PyQt6`, `QThread` orchestration, `pyqtgraph` OpenGL 3D surface rendering.
+## Technical Debt & Orphaned Code
+- **Multilevel Monte Carlo (MLMC)**: The codebase contains a compiled `mc/mlmc.hpp` module implementing Giles' framework for $O(\epsilon^{-2}(\log \epsilon)^2)$ complexity pricing. This code is entirely orphaned. The engine executes a single Monte Carlo path.
+- **Offline Calibration**: The whitepaper describes deep GPU-accelerated Expectation-Maximization (EM) and Fast Fourier Transforms (FFT). These do not exist in the C++ repo. The engine expects a pre-calibrated `default_config.json` payload and operates purely as a forward-pass consumer.
+- **Legacy IPC**: The whitepaper claims an exponential backoff telemetry loop; the reality is a fixed 2ms linear retry loop in `io/telemetry.hpp`.
 
 ---
 
-## Build & Run Instructions
+## C++ Systems Architecture & Performance
 
-### Prerequisites (Windows)
-1. Install [MSYS2](https://www.msys2.org/).
-2. Open MSYS2 UCRT64 terminal and install the build chain:
-   ```bash
-   pacman -S mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-make mingw-w64-ucrt-x86_64-eigen3 mingw-w64-ucrt-x86_64-nlohmann-json
-   ```
-3. Install Python requirements:
-   ```bash
-   pip install PyQt6 pyqtgraph numpy
-   ```
+### Data-Oriented Design (DOD) and Cache Locality
+Modern CPUs are completely bottlenecked by memory latency, not compute cycles. Standard Object-Oriented C++ architectures (e.g., `class LimitOrder { float price; float qty; LimitOrder* next; }`) utterly destroy the L1/L2 cache through pointer chasing and heap fragmentation.
 
-### Execution
-Simply run the Python orchestration script, which will automatically spawn a background `QThread` to manage the C++ binary lifecycle:
+SOVEREIGN utilizes strict **Data-Oriented Design**:
+- **Array-of-Structures (AoS) to Structure-of-Arrays (SoA)**: The Limit Order Book is heavily linearized. Price levels are implicitly derived from integer array indices. 
+- **`alignas(64)` Cache-Line Alignment**: All critical numerical buffers (`Eigen::VectorXd`, RNG states, Hawkes intensity vectors) are explicitly aligned to 64-byte boundaries. This guarantees that SIMD vector loads never cross cache-line boundaries and completely eradicates False Sharing across multi-core boundaries.
+- **Zero Heap Allocations in Hot Path**: Following the initialization phase, the engine strictly forbids `new`, `malloc`, or `std::vector::push_back`. All required memory is pre-allocated in massive contiguous pools.
+
+### SIMD Vectorization (AVX2 / AVX-512)
+The engine forces the compiler to emit vectorized instructions for all heavy linear algebra. 
+- The EWMA Covariance updates $\boldsymbol{\Sigma}_t = \alpha \left( \mathbf{r}_t \mathbf{r}_t^T \right) + (1-\alpha) \boldsymbol{\Sigma}_{t-\Delta t}$ are mapped via `Eigen::MatrixXd` with `-march=native -O3`, triggering packed Fused-Multiply-Add (FMA) instructions.
+- Box-Muller Gaussian RNG generation is vectorized with cached spares.
+
+### Lock-Free Concurrency
+SOVEREIGN utilizes a dual-thread architecture to isolate nanosecond-latency order matching from heavy Topological Data Analysis (TDA).
+- **Thread 1 (Hot Path)**: Evaluates Layers 1 through 5. Modifies the LOB, computes the HJB PDE, and propagates Hawkes intensities.
+- **Thread 2 (Cold Path)**: Evaluates Layers 6 and 7. Extracts eigenvalues, computes the Fiedler vector, and executes the Vietoris-Rips filtration.
+- **IPC Synchronization**: To avoid catastrophic mutex contention, state is transferred via `std::atomic` pointer swaps and single-producer single-consumer (SPSC) lock-free ring buffers. The Hot Path never blocks waiting for the Topology Engine.
+
+---
+
+## Telemetry & UI Configuration Details
+
+The SOVEREIGN dashboard is not a simple plotting script; it is a high-performance **OpenGL rendering pipeline** designed to ingest and visualize thousands of data points per second without bottlenecking the C++ engine.
+
+### Python UI Dictatorship
+While the engine parses `default_config.json` on startup, the Python PyQt6 UI acts as an absolute dictator. CLI arguments parsed from the UI override the JSON configurations silently.
+
+### JSON Decimation & IPC
+Logging standard ASCII to `stdout` every tick would instantaneously crash the I/O bus. 
+- **Decimation**: The C++ engine only writes telemetry to a memory-mapped named pipe (or decimated JSON log) every $10$ ticks.
+- **Batched Serialization**: Telemetry is serialized using the ultra-fast `nlohmann/json` library, formatting the correlation matrix, the LOB state, the mid-price, the ruin vectors, and the TRI scalar into a single byte stream.
+
+### PyQtGraph Shader Pipeline
+The Python dashboard (`dashboard.py`) utilizes `PyQtGraph`, which is built directly on top of PyQt6 and OpenGL.
+- **Vertex Buffer Objects (VBOs)**: Instead of updating matplotlib artists, the dashboard pushes raw numpy arrays directly to the GPU via OpenGL VBOs.
+- **Dynamic Downsampling**: When visualizing the multi-asset price envelope (10 assets $\times$ 100,000 ticks), the dashboard applies min-max decimation algorithms to ensure the GPU only renders the exact pixels visible on the monitor, maintaining a flawless 60 FPS refresh rate.
+
+---
+
+## Build & Run
+
+### Prerequisites (Windows / MSYS2 UCRT64)
 ```bash
+pacman -S mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-cmake \
+          mingw-w64-ucrt-x86_64-eigen3 mingw-w64-ucrt-x86_64-nlohmann-json
+pip install PyQt6 pyqtgraph numpy
+```
+
+### Build
+```bash
+mkdir build && cd build
+cmake .. -G "MinGW Makefiles"
+cmake --build .
+```
+
+### Run
+```bash
+# Engine only
+./sovereign.exe
+
+# With Dashboard
 python sovereign_dashboard.py
 ```
-> **Note**: Due to the severe $O(N^2)$ algebraic topology and recursive correlation matrix evaluations, memory pressure scales aggressively with the asset universe size. Limit to `-j1` parallel threads on constrained hardware.
 
 ---
-*Developed by Keykyrios*
+
+*made by keykyrios (Mitrajit Ghorui)*

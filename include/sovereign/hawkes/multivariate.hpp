@@ -29,6 +29,9 @@ class HawkesEngine {
     // Baseline intensity μ [dim_]
     Eigen::VectorXd mu_;
 
+    // Per-asset baseline modulation (ruin -> Hawkes feedback)
+    Eigen::VectorXd baseline_mod_;
+
     // Excitation: α_{ij} for self and cross-asset [N×N]
     Eigen::MatrixXd alpha_;
     Eigen::MatrixXd beta_mat_;
@@ -36,60 +39,63 @@ class HawkesEngine {
 
     // Recursive auxiliary variables for sum-of-exponentials
     // A_m(i,j) tracks the decayed history contribution
-    // Using 3-component sum-of-exp approximation of power-law
-    static constexpr int N_EXP = 3;
+    // 10-component sum-of-exp: proper long-memory power-law approximation
+    // (Hardiman, Bercot & Bouchaud 2013 — 3 terms loses critical reflexivity)
+    static constexpr int N_EXP = 10;
     struct RecursiveState {
-        double A[N_EXP] = {0, 0, 0};
+        double A[N_EXP] = {};
         double last_time = 0;
     };
-    // recursive_[i][j] = recursive state for influence j→i
     std::vector<std::vector<RecursiveState>> recursive_;
 
-    // Sum-of-exp approximation of power-law kernel
-    double exp_alpha_[N_EXP] = {0.3, 0.15, 0.05};
-    double exp_beta_[N_EXP]  = {10.0, 1.0, 0.1};
+    double exp_alpha_[N_EXP] = {};
+    double exp_beta_[N_EXP]  = {};
+
+    // Max single-event jump for thinning bound
+    double max_alpha_sum_ = 0;
 
     HawkesStabilityProjector projector_;
 
-    /// Flatten index (asset, order_type, depth) → linear
     int idx(int asset, int order_type, int depth) const {
         return asset * K_ * D_ + order_type * D_ + depth;
     }
 
     void fit_sum_exp_to_powerlaw() {
-        // Effective branching ratio from asset j to asset i:
-        //   ρ_eff(i←j) = (α_ij/α_self) × Σ_m exp_alpha[m]/exp_beta[m]
-        // Total branching FROM one event = Σ_j ρ_eff(i←j)
-        //
-        // We need Σ_j (α_ij/α_self) × B_self < ρ_max
-        // where B_self = Σ_m exp_alpha[m]/exp_beta[m]
-        //
-        // Worst-case row sum of (α_ij/α_self): self=1, cross = N-1 cross/self
-        // After Dykstra, alpha_ may be rescaled — compute actual max row sum
-        double max_row_sum = 1.0;  // Self
-        for (int j = 0; j < N_; ++j) {
-            if (j != 0) max_row_sum += alpha_(0, j) / (cfg_.alpha_self + 1e-12);
+        double max_row_sum = 1.0;
+        for (int i = 0; i < N_; ++i) {
+            double row_sum = 1.0;
+            for (int j = 0; j < N_; ++j) {
+                if (i != j) row_sum += alpha_(i, j) / (cfg_.alpha_self + 1e-12);
+            }
+            max_row_sum = std::max(max_row_sum, row_sum);
         }
-        // Target per-event branching ratio (self kernel only)
         double B_target = cfg_.max_spectral_radius / (max_row_sum + 1e-10);
-        B_target = std::max(B_target, 0.01);  // Floor
+        B_target = std::max(B_target, 0.01);
 
-        // Shape: fast/medium/slow components with fixed ratios
-        // B_self = a*(0.6/10 + 0.3/1 + 0.1/0.1) = a*(0.06 + 0.3 + 1.0) = 1.36*a
-        // Solve: 1.36 * a = B_target  →  a = B_target / 1.36
-        double a = B_target / 1.36;
-        exp_alpha_[0] = a * 0.6;  exp_beta_[0] = 10.0;
-        exp_alpha_[1] = a * 0.3;  exp_beta_[1] = 1.0;
-        exp_alpha_[2] = a * 0.1;  exp_beta_[2] = 0.1;
+        // 10 log-spaced decay rates from 100 (fast) to 0.01 (slow)
+        // Memory horizon: 1/beta_min = 100 time units
+        double B_sum = 0;
+        for (int m = 0; m < N_EXP; ++m) {
+            exp_beta_[m] = 100.0 * std::pow(0.01 / 100.0, (double)m / (N_EXP - 1));
+            exp_alpha_[m] = 1.0;  // temporary
+            B_sum += 1.0 / exp_beta_[m];
+        }
+        // Scale alphas so total branching = B_target
+        double scale = B_target / B_sum;
+        max_alpha_sum_ = 0;
+        for (int m = 0; m < N_EXP; ++m) {
+            exp_alpha_[m] = scale;
+            max_alpha_sum_ += exp_alpha_[m];
+        }
 
-        // Verify
+        // Final safety check
         double B_actual = 0;
         for (int m = 0; m < N_EXP; ++m)
             B_actual += exp_alpha_[m] / exp_beta_[m];
-        // If still too high, rescale
         if (B_actual * max_row_sum > cfg_.max_spectral_radius) {
-            double scale = cfg_.max_spectral_radius / (B_actual * max_row_sum + 1e-10);
-            for (int m = 0; m < N_EXP; ++m) exp_alpha_[m] *= scale;
+            double s = cfg_.max_spectral_radius / (B_actual * max_row_sum + 1e-10);
+            for (int m = 0; m < N_EXP; ++m) exp_alpha_[m] *= s;
+            max_alpha_sum_ *= s;
         }
     }
 
@@ -102,6 +108,7 @@ public:
         // Baseline intensity: divide by K*D so aggregate per-asset = base_intensity
         double mu_per_dim = cfg_.base_intensity / (K_ * D_);
         mu_ = Eigen::VectorXd::Constant(dim_, mu_per_dim);
+        baseline_mod_ = Eigen::VectorXd::Ones(N_);
 
         // Cross-asset excitation matrix [N×N]
         alpha_ = Eigen::MatrixXd::Zero(N_, N_);
@@ -109,13 +116,15 @@ public:
         epsilon_mat_ = Eigen::MatrixXd::Constant(N_, N_, cfg_.epsilon);
 
         for (int i = 0; i < N_; ++i) {
-            alpha_(i, i) = cfg_.alpha_self;
+            // Power-law scale (Zipf's law) to simulate heterogeneous market capitalization
+            double cap_scale = 1.0 / std::sqrt(static_cast<double>(i + 1));
+            alpha_(i, i) = cfg_.alpha_self * cap_scale;
             for (int j = 0; j < N_; ++j) {
-                if (i != j) alpha_(i, j) = cfg_.alpha_cross;
+                if (i != j) alpha_(i, j) = cfg_.alpha_cross * cap_scale;
             }
         }
 
-        // Project for stationarity
+        // Project for stationarity at init (not just after modulate_by_graph)
         projector_.dykstra_project(alpha_, beta_mat_, epsilon_mat_);
 
         // Recursive state
@@ -124,73 +133,90 @@ public:
         fit_sum_exp_to_powerlaw();
     }
 
-    /// Get current intensity for asset i, order type k, depth d
-    double intensity(int i, int k, int d, double t) const {
-        double lam = mu_(idx(i, k, d));
-        // Add contributions from all assets via decayed history
+    /// Compute the shared excitation component for asset i at time t
+    double compute_excitation(int i, double t) const {
+        double lam = 0;
         for (int j = 0; j < N_; ++j) {
             const auto& rs = recursive_[i][j];
             double a_ij = (j == i) ? cfg_.alpha_self : alpha_(i, j);
-            double dt_last = t - rs.last_time;
-            for (int m = 0; m < N_EXP; ++m) {
-                // Normalise: exp_alpha_[m] was set proportional to alpha_self
-                // We need a_ij-relative weight
-                double w = (cfg_.alpha_self > 1e-12)
-                           ? (a_ij / cfg_.alpha_self) : 0.0;
-                lam += w * rs.A[m] * std::exp(-exp_beta_[m] * dt_last);
-            }
+            double w = (cfg_.alpha_self > 1e-12) ? (a_ij / cfg_.alpha_self) : 0.0;
+            if (w < 1e-15) continue;  // skip zero-weight pairs
+
+            double dt_last = std::max(0.0, t - rs.last_time); // Guard against inverted times
+            
+            double contrib = 0;
+            for (int m = 0; m < N_EXP; ++m)
+                contrib += rs.A[m] * std::exp(-exp_beta_[m] * dt_last);
+            lam += w * contrib;
         }
-        return std::max(lam, 0.0);
+        return lam;
     }
 
-    /// Get aggregate intensity for asset i (sum over all k, d)
-    double aggregate_intensity(int i, double t) const {
-        double total = 0;
+    /// Get current intensity for asset i, order type k, depth d, given precomputed excitation
+    double intensity(int i, int k, int d, double exc) const {
+        return std::max(mu_(idx(i, k, d)) * baseline_mod_(i) + exc, 0.0);
+    }
+
+    /// Get aggregate intensity for asset i using precomputed excitation
+    double aggregate_intensity(int i, double exc) const {
+        double total_mu = 0;
         for (int k = 0; k < K_; ++k)
             for (int d = 0; d < D_; ++d)
-                total += intensity(i, k, d, t);
-        return total;
+                total_mu += mu_(idx(i, k, d)) * baseline_mod_(i);
+        return std::max(total_mu + K_ * D_ * exc, 0.0);
     }
 
-    /// Record an event: asset j fired at time t → update recursive states
-    void record_event(int j, double t) {
+    /// Record an event: asset j fired at time t with mark (size)
+    /// Excitation proportional to mark: big orders excite more
+    void record_event(int j, double t, double mark_size = 1.0) {
+        // Normalize mark around 1.0: mark_size from exponential(0.1) has mean ~11
+        // Divide by mean to preserve configured branching ratio
+        constexpr double MEAN_MARK = 11.0;  // 1.0 + E[Exp(0.1)] = 1 + 10
+        double mark_weight = std::clamp(mark_size / MEAN_MARK, 0.1, 3.0);
         for (int i = 0; i < N_; ++i) {
             auto& rs = recursive_[i][j];
-            double dt = t - rs.last_time;
-            // Decay existing + add new impulse
+            double dt = std::max(0.0, t - rs.last_time);
+            // Decay existing + add mark-weighted impulse
             for (int m = 0; m < N_EXP; ++m) {
-                rs.A[m] = rs.A[m] * std::exp(-exp_beta_[m] * dt) + exp_alpha_[m];
+                rs.A[m] = rs.A[m] * std::exp(-exp_beta_[m] * dt)
+                        + exp_alpha_[m] * mark_weight;
             }
             rs.last_time = t;
         }
     }
 
     /// Ogata thinning: generate events in [t, t+dt] for all assets.
-    /// Hard cap: at most max_events_per_step to prevent explosion near criticality.
+    /// Simulates true endogenous avalanches without artificial limits.
     void generate_events(SimulationClock& clock, SimulationState& state,
-                         double dt, Xoshiro256& rng,
-                         int max_events_per_step = 200)
+                         double dt, Xoshiro256& rng)
     {
         double t_start = state.t;
         double t_end = t_start + dt;
 
+        // Correct thinning bound: current intensity + max possible jump
+        // An event adds mark_weight * sum(w * alpha) to EVERY (k, d) bin for EVERY asset
         double lambda_bar = 0;
-        for (int i = 0; i < N_; ++i)
-            lambda_bar += aggregate_intensity(i, t_start);
-        lambda_bar = std::min(lambda_bar * 1.5, 1e6);  // Hard cap on upper bound
+        std::vector<double> current_exc(N_);
+        for (int i = 0; i < N_; ++i) {
+            current_exc[i] = compute_excitation(i, t_start);
+            lambda_bar += aggregate_intensity(i, current_exc[i]);
+        }
 
         double t_cur = t_start;
         int n_accepted = 0;
 
-        while (t_cur < t_end && n_accepted < max_events_per_step) {
+        while (t_cur < t_end) {
             if (lambda_bar < 1e-10) break;
+            if (n_accepted >= 1000000) break;  // Allow massive avalanches, but stop true infinite loops
             double tau = rng.exponential(lambda_bar);
             t_cur += tau;
             if (t_cur >= t_end) break;
 
             double lambda_actual = 0;
-            for (int i = 0; i < N_; ++i)
-                lambda_actual += aggregate_intensity(i, t_cur);
+            for (int i = 0; i < N_; ++i) {
+                current_exc[i] = compute_excitation(i, t_cur);
+                lambda_actual += aggregate_intensity(i, current_exc[i]);
+            }
 
             if (rng.uniform() * lambda_bar <= lambda_actual) {
                 double u = rng.uniform() * lambda_actual;
@@ -198,8 +224,8 @@ public:
                 bool accepted = false;
                 for (int i = 0; i < N_ && !accepted; ++i) {
                     for (int k = 0; k < K_ && !accepted; ++k) {
-                        for (int d = 0; d < std::min(D_, 5) && !accepted; ++d) {
-                            cumul += intensity(i, k, d, t_cur);
+                        for (int d = 0; d < D_ && !accepted; ++d) { // Check all D_ levels
+                            cumul += intensity(i, k, d, current_exc[i]);
                             if (u <= cumul) {
                                 Event ev;
                                 ev.time = t_cur;
@@ -207,25 +233,29 @@ public:
                                 ev.event_type = k;
                                 ev.depth_level = d;
                                 ev.size = 1.0 + rng.exponential(0.1);
-                                ev.is_buy = rng.uniform() < 0.5;
+                                double alpha_skew = 0.1 * (baseline_mod_(i) - 1.0); // Panic momentum
+                                ev.is_buy = rng.uniform() < std::clamp(0.5 - alpha_skew, 0.1, 0.9);
                                 clock.schedule(ev);
-                                record_event(i, t_cur);
+                                record_event(i, t_cur, ev.size);  // mark-dependent excitation
+                                // Unsynchronized increment of state.total_events — safe since generate_events is single-threaded
                                 state.total_events++;
+                                // Update hawkes_intensity array correctly for the single accepted event
                                 state.assets[i].hawkes_intensity(k * D_ + d) =
-                                    intensity(i, k, d, t_cur);
+                                    intensity(i, k, d, compute_excitation(i, t_cur));
                                 ++n_accepted;
                                 accepted = true;
                             }
                         }
                     }
                 }
+                
+                // Ogata update: The intensity strictly decays between events.
+                // The true supremum for the remaining interval is the exact intensity just AFTER the event.
+                lambda_bar = 0;
+                for (int i = 0; i < N_; ++i) {
+                    lambda_bar += aggregate_intensity(i, compute_excitation(i, t_cur));
+                }
             }
-
-            // Update upper bound
-            lambda_bar = 0;
-            for (int i = 0; i < N_; ++i)
-                lambda_bar += aggregate_intensity(i, t_cur);
-            lambda_bar = std::min(lambda_bar * 1.5, 1e6);
             lambda_bar = std::max(lambda_bar, 1.0);
         }
     }
@@ -240,10 +270,14 @@ public:
         projector_.dykstra_project(alpha_, beta_mat_, epsilon_mat_);
     }
 
-    Eigen::VectorXd aggregate_intensities(double t) const {
-        Eigen::VectorXd v(N_);
-        for (int i = 0; i < N_; ++i) v(i) = aggregate_intensity(i, t);
-        return v;
+    /// Ruin -> Hawkes feedback: modulate baseline intensity
+    void set_baseline_modulation(int asset, double mod) {
+        if (asset >= 0 && asset < N_)
+            baseline_mod_(asset) = std::clamp(mod, 0.5, 5.0);
+    }
+
+    void aggregate_intensities(double t, Eigen::VectorXd& out) const {
+        for (int i = 0; i < N_; ++i) out(i) = aggregate_intensity(i, compute_excitation(i, t));
     }
 
     double total_branching_ratio() const {
@@ -251,8 +285,13 @@ public:
         for (int m = 0; m < N_EXP; ++m)
             B_self += exp_alpha_[m] / exp_beta_[m];
         double max_row = 1.0;
-        for (int j = 1; j < N_; ++j)
-            max_row += alpha_(0, j) / (cfg_.alpha_self + 1e-12);
+        for (int i = 0; i < N_; ++i) {
+            double row_sum = 1.0;
+            for (int j = 0; j < N_; ++j) {
+                if (i != j) row_sum += alpha_(i, j) / (cfg_.alpha_self + 1e-12);
+            }
+            max_row = std::max(max_row, row_sum);
+        }
         return B_self * max_row;
     }
 };

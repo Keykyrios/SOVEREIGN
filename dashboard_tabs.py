@@ -15,6 +15,15 @@ import pyqtgraph.opengl as gl
 from dashboard import SimData, mkplot, PALETTE, PANEL_BG, GRID
 from dashboard import ACCENT, ACCENT2, ACCENT3, WARN, TEXT
 
+def ewma(x, alpha=0.05):
+    """Simple Exponentially Weighted Moving Average for UI smoothing."""
+    if len(x) == 0: return x
+    s = np.zeros_like(x)
+    s[0] = x[0]
+    for i in range(1, len(x)):
+        s[i] = alpha * x[i] + (1 - alpha) * s[i-1]
+    return s
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Tab 1 — Market Overview
@@ -30,10 +39,15 @@ class MarketTab(QWidget):
 
         self.pp = mkplot('Price Paths  P_i(t)', 'Step', 'Price ($)')
         self.pv = mkplot('Instantaneous Volatility  σ_i(t)', 'Step', 'σ')
-        self.ph = mkplot('Stochastic Hurst Exponent  H_i(t)', 'Step', 'H')
+        self.ph = mkplot('Stochastic Hurst Exponent  H_i(t)', 'Step', 'H', yrange=(0, 0.5))
+        self.ph.enableAutoRange(axis='y', enable=False)  # Lock Y range to [0, 0.5]
         self.pr = mkplot('Ruin Probability  Γ_i(t)', 'Asset', 'Γ', yrange=(0, 1))
         self.bar_ruin = pg.BarGraphItem(x=[], height=[], width=0.7, brush=WARN)
         self.pr.addItem(self.bar_ruin)
+
+        # Link X-axes so all plots scroll together
+        self.pv.setXLink(self.pp)
+        self.ph.setXLink(self.pp)
 
         for w in (self.pp, self.pv, self.ph, self.pr): sp.addWidget(w)
         sp.setSizes([300, 200, 200, 150])
@@ -42,6 +56,7 @@ class MarketTab(QWidget):
     def update(self):
         N = self.d.N()
         if not N: return
+        n_pts = 0
         for i in range(min(N, 20)):
             col = PALETTE[i % len(PALETTE)]
             if i not in self.cp:
@@ -51,6 +66,17 @@ class MarketTab(QWidget):
             for curve, field in ((self.cp[i],'price'),(self.cv[i],'vol'),(self.ch[i],'hurst')):
                 ts = self.d.ts(field, asset=i)
                 curve.setData(np.arange(len(ts)), ts)
+                n_pts = max(n_pts, len(ts))
+
+        # Force viewport to scroll forward — show last 500 points as a moving window
+        if n_pts > 0:
+            window = 500
+            x_max = n_pts
+            x_min = max(0, x_max - window)
+            self.pp.setXRange(x_min, x_max, padding=0.02)
+            # Y auto-ranges within the visible window
+            self.pp.enableAutoRange(axis='y')
+            self.pv.enableAutoRange(axis='y')
 
         ruin = self.d.ruin_vec()
         if len(ruin):
@@ -129,7 +155,8 @@ class SurfaceTab(QWidget):
         super().__init__(); self.d = d
         self._vol_surf = None; self._corr_surf = None
         self._hurst_surf = None; self._eig_curve = None
-        self._vol_hist = []; self._hurst_hist = []
+        self._vol_hist_np = None; self._hurst_hist_np = None
+        self._hist_idx = 0
 
         layout = QGridLayout(self)
         layout.setSpacing(4)
@@ -188,9 +215,8 @@ class SurfaceTab(QWidget):
                 colors=cols, shader='shaded', smooth=True)
             glw.addItem(item)
         else:
-            item.setData(x=xs.astype(np.float32),
-                         y=ys.astype(np.float32),
-                         z=Z.astype(np.float32),
+            # ONLY update z and colors to prevent VBO re-allocations (VRAM leak)
+            item.setData(z=Z.astype(np.float32),
                          colors=cols)
         return item
 
@@ -202,30 +228,27 @@ class SurfaceTab(QWidget):
         hurst_row = self.d.asset_vec('hurst')
         if not len(vol_row): return
 
-        self._vol_hist.append(vol_row.copy())
-        self._hurst_hist.append(hurst_row.copy())
-        if len(self._vol_hist) > 80:   self._vol_hist.pop(0)
-        if len(self._hurst_hist) > 80: self._hurst_hist.pop(0)
+        if self._vol_hist_np is None or self._vol_hist_np.shape[1] != N:
+            self._vol_hist_np = np.zeros((80, N), dtype=np.float32)
+            self._hurst_hist_np = np.zeros((80, N), dtype=np.float32)
 
-        T = len(self._vol_hist)
-        if T < 2: return
+        # Roll history
+        self._vol_hist_np = np.roll(self._vol_hist_np, -1, axis=0)
+        self._hurst_hist_np = np.roll(self._hurst_hist_np, -1, axis=0)
+        self._vol_hist_np[-1, :] = vol_row
+        self._hurst_hist_np[-1, :] = hurst_row
+        
+        self._hist_idx = min(self._hist_idx + 1, 80)
 
         T_MAX = 80
         xs = np.linspace(0, 10, T_MAX, dtype=np.float32)
         ys = np.linspace(0, 10, N, dtype=np.float32)
 
-        Zv = np.zeros((T_MAX, N), dtype=np.float32)
-        Zh = np.zeros((T_MAX, N), dtype=np.float32)
-        
-        v_hist = np.array(self._vol_hist, dtype=np.float32) * 50
-        h_hist = np.array(self._hurst_hist, dtype=np.float32) * 20
-        
-        pad = T_MAX - T
-        Zv[pad:, :] = v_hist
-        Zh[pad:, :] = h_hist
-        if pad > 0:
-            Zv[:pad, :] = v_hist[0, :]
-            Zh[:pad, :] = h_hist[0, :]
+        v_hist = self._vol_hist_np * 15.0
+        h_hist = self._hurst_hist_np * 20.0
+
+        Zv = v_hist.astype(np.float32)
+        Zh = h_hist.astype(np.float32)
 
         self._vol_surf   = self._add_surf(self.gl_vol,   self._vol_surf,   Zv, xs, ys)
         self._hurst_surf = self._add_surf(self.gl_hurst, self._hurst_surf, Zh, xs, ys)
@@ -302,29 +325,49 @@ class TopologyTab(QWidget):
         if len(btw) == N:
             self.bar_btw.setOpts(x=np.arange(N), height=btw, width=0.7)
 
-            # 3D network: nodes on sphere, coloured by ruin, sized by betweenness
-            theta = np.linspace(0, 2*np.pi, N, endpoint=False)
-            phi   = np.linspace(0.2, np.pi - 0.2, N)
-            R     = 8.0
-            pos = np.column_stack([
-                R * np.sin(phi) * np.cos(theta),
-                R * np.sin(phi) * np.sin(theta),
-                R * np.cos(phi)
-            ]).astype(np.float32)
             sizes  = (6 + btw * 20).astype(np.float32)
             colors = np.zeros((N, 4), np.float32)
             colors[:, 0] = ruin           # R
             colors[:, 2] = 1 - ruin       # B
             colors[:, 3] = 0.9
 
+            # 3D network: REAL-TIME FORCE DIRECTED LAYOUT
+            # Replaces the fake sphere with a true correlation-based spring layout
             if self._nodes is None:
+                phi = np.random.uniform(0, np.pi, N)
+                theta = np.random.uniform(0, 2*np.pi, N)
+                self.pos3d = 5.0 * np.column_stack([
+                    np.sin(phi)*np.cos(theta),
+                    np.sin(phi)*np.sin(theta),
+                    np.cos(phi)
+                ]).astype(np.float32)
                 self._nodes = gl.GLScatterPlotItem(
-                    pos=pos, size=sizes, color=colors, pxMode=True)
+                    pos=self.pos3d, size=sizes, color=colors, pxMode=True)
                 self.glnet.addItem(self._nodes)
             else:
-                self._nodes.setData(pos=pos, size=sizes, color=colors)
+                # 1 iteration of Fruchterman-Reingold physics
+                pos = self.pos3d
+                diff = pos[:, np.newaxis, :] - pos[np.newaxis, :, :] # (N, N, 3)
+                dist = np.linalg.norm(diff, axis=2) + 1e-5
+                
+                # Target resting lengths from actual mathematical distance matrix
+                D = self.d.dist_matrix()
+                target = D * 4.0 
+                
+                # Hooke's Law springs between all nodes
+                force = 0.05 * (target - dist)[..., np.newaxis] * (diff / dist[..., np.newaxis])
+                
+                # Coulomb repulsion to spread them out
+                repulsion = 2.0 * (diff / dist[..., np.newaxis]) / (dist**2)[..., np.newaxis]
+                
+                disp = np.sum(force + repulsion, axis=1)
+                disp -= 0.05 * pos # weak gravity to origin
+                
+                # Apply velocity with max speed limit
+                self.pos3d += np.clip(disp, -0.5, 0.5)
+                self._nodes.setData(pos=self.pos3d.astype(np.float32), size=sizes, color=colors)
 
-        fts = self.d.ts('fiedler')
+        fts = ewma(self.d.ts('fiedler'), alpha=0.05)
         if len(fts): self.cf.setData(np.arange(len(fts)), fts)
 
 
@@ -364,6 +407,8 @@ class TDATab(QWidget):
         # Diagonal reference
         self.ppers.plot([0,2],[0,2], pen=pg.mkPen('#334455',width=1,
                                     style=Qt.PenStyle.DashLine))
+        # Auto-range: let the diagram scale to the actual persistence data
+        self.ppers.enableAutoRange()
 
         layout.addWidget(self.ptri,  0, 0)
         layout.addWidget(self.pw2,   0, 1)
@@ -399,10 +444,10 @@ class TDATab(QWidget):
         N = self.d.N()
         if not N: return
 
-        ts_tri = self.d.ts('tri')
-        ts_w2  = self.d.ts('wasserstein')
-        ts_l1  = self.d.ts('l1')
-        ts_l2  = self.d.ts('l2')
+        ts_tri = ewma(self.d.ts('tri'), alpha=0.05)
+        ts_w2  = ewma(self.d.ts('wasserstein'), alpha=0.05)
+        ts_l1  = ewma(self.d.ts('l1'), alpha=0.05)
+        ts_l2  = ewma(self.d.ts('l2'), alpha=0.05)
         xs = lambda ts: np.arange(len(ts))
 
         self.ctri.setData(xs(ts_tri), ts_tri)
@@ -504,22 +549,42 @@ class CrisisTab(QWidget):
         self.v_step.setText(str(step))
         self.v_w2.setText(f'{w2:.4f}')
 
-        # Time series
+        # Time series with PROPER THEORETICAL BOUNDS
         fts  = d.ts('fiedler')
         tts  = d.ts('tri')
-        rtss = [d.ts('ruin', i) for i in range(min(d.N(), 1))]
-
-        def norm_ts(a): return a / (a.max() + 1e-12)
+        N_assets = d.N()
 
         xs = np.arange(len(fts))
-        self.cc_fi.setData(xs, np.clip(1 - fts, 0, 1))
+        fts_clean = np.nan_to_num(fts, nan=float(N_assets))
+
+        # Fiedler: unnormalized Laplacian eigenvalue bounded by [0, N].
+        # Scale by N/2 to get [0, 1]. Plot (1 - scaled) so fragmentation spikes UP.
+        fiedler_norm = np.clip(fts_clean / (N_assets * 0.5), 0, 1)
+        self.cc_fi.setData(xs, 1.0 - fiedler_norm)
+
+        # TRI: Use a fixed absolute scale (200) instead of dividing by moving max
+        # (dividing by max always gives 1.0 — mathematically useless)
         xs_t = np.arange(len(tts))
-        self.cc_tri.setData(xs_t, norm_ts(np.clip(tts, 0, None)))
-        if rtss and len(rtss[0]):
-            self.cc_ru.setData(np.arange(len(rtss[0])), rtss[0])
+        tts_clean = np.nan_to_num(tts, nan=0.0)
+        tri_norm = np.clip(tts_clean / 200.0, 0, 1)
+        self.cc_tri.setData(xs_t, tri_norm)
+
+        # Max Ruin across ALL assets (not just asset 0)
+        if len(ruin):
+            max_ruin_ts = np.array([
+                float(np.max([
+                    h.get('ruin_vector', [0])[j] if j < len(h.get('ruin_vector', []))
+                    else 0 for j in range(N_assets)
+                ])) for h in d.hist
+            ]) if d.hist else np.zeros(len(xs))
+            if len(max_ruin_ts):
+                self.cc_ru.setData(np.arange(len(max_ruin_ts)), max_ruin_ts)
 
         # Endogenous crisis score — purely from engine data
-        score = (1 - fiedler) * 0.35 + min(max_ru, 1) * 0.4 + min(tri / 10, 1) * 0.25
+        # Use properly bounded metrics for the composite score
+        fiedler_stress = max(0, 1.0 - fiedler / (N_assets * 0.5))
+        tri_stress = min(tri / 200.0, 1.0)
+        score = fiedler_stress * 0.35 + min(max_ru, 1) * 0.4 + tri_stress * 0.25
         if score > 0.65:
             self.alert.setText('[CRITICAL] ENDOGENOUS PHASE TRANSITION DETECTED')
             self.alert.setStyleSheet(f'color:{WARN};font-size:15px;font-weight:bold;')

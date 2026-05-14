@@ -36,14 +36,16 @@ class SovereignDashboard(QMainWindow):
         self.tab_tda      = TDATab(self.data)
         self.tab_crisis   = CrisisTab(self.data)
 
-        self.tabs.addTab(self.tab_market,    '📈  Market')
-        self.tabs.addTab(self.tab_orderbook, '📖  Order Book')
-        self.tabs.addTab(self.tab_surface,   '🌐  3D Surfaces')
-        self.tabs.addTab(self.tab_topology,  '🕸  Topology')
-        self.tabs.addTab(self.tab_tda,       '⬡  TDA / Risk')
-        self.tabs.addTab(self.tab_crisis,    '🚨  Crisis')
+        self.tabs.addTab(self.tab_market,    ' Market')
+        self.tabs.addTab(self.tab_orderbook, '  Order Book')
+        self.tabs.addTab(self.tab_surface,   '  3D Surfaces')
+        self.tabs.addTab(self.tab_topology,  '  Topology')
+        self.tabs.addTab(self.tab_tda,       '  TDA / Risk')
+        self.tabs.addTab(self.tab_crisis,    '  Crisis')
 
         self.setCentralWidget(self.tabs)
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+        self._last_rendered_tab = -1
 
         # ── Status bar ───────────────────────────────────────────────────────
         sb = QStatusBar()
@@ -62,46 +64,57 @@ class SovereignDashboard(QMainWindow):
 
         self.timer = QTimer()
         self.timer.timeout.connect(self._tick)
-        self.timer.start(150)  # 150 ms poll interval ≈ 6 FPS max
+        self.timer.start(16)  # 16 ms poll interval ≈ 60 FPS max
 
-        # 3D surfaces update slower (expensive)
+        # 3D surfaces update slightly slower (expensive, but much faster than before)
         self.timer_3d = QTimer()
         self.timer_3d.timeout.connect(self._tick_3d)
-        self.timer_3d.start(500)
+        self.timer_3d.start(33)  # ~30 FPS for 3D surfaces
+        self._new_data_arrived = False  # Gate for 3D updates
+
+    def _on_tab_changed(self, index):
+        self._last_rendered_tab = -1
+        self._new_data_arrived = True
 
     def _tick(self):
         import time
         t0 = time.perf_counter()
 
         updated = self.data.poll()
+        current = self.tabs.currentIndex()
 
-        if updated or self.data.snap:
-            snap = self.data.snap
-            N = self.data.N()
+        if updated or self._last_rendered_tab != current:
+            self._last_rendered_tab = current
+            if updated:
+                self._new_data_arrived = True  # Signal for 3D timer
 
-            # Update non-3D tabs
-            current = self.tabs.currentIndex()
-            if   current == 0: self.tab_market.update()
-            elif current == 1: self.tab_orderbook.update()
-            elif current == 3: self.tab_topology.update()
-            elif current == 4: self.tab_tda.update()
-            elif current == 5: self.tab_crisis.update()
+            if self.data.snap:
+                snap = self.data.snap
+                N = self.data.N()
 
-            # Status bar always updated
-            self.tab_crisis.update()  # keeps metrics live
+                # Update ONLY the currently visible tab
+                if   current == 0: self.tab_market.update()
+                elif current == 1: self.tab_orderbook.update()
+                elif current == 3: self.tab_topology.update()
+                elif current == 4: self.tab_tda.update()
+                elif current == 5: self.tab_crisis.update()
 
-            step   = snap.get('step', 0) if snap else 0
-            t_sim  = snap.get('t', 0.0) if snap else 0.0
-            evts   = snap.get('total_events', 0) if snap else 0
-            fiedler= snap.get('fiedler', 1.0) if snap else 1.0
-            tri    = snap.get('tri', 0.0) if snap else 0.0
+                # Status bar always updated with new data
+                if updated:
+                    self.tab_crisis.update()
 
-            color = WARN if fiedler < 0.1 else (ACCENT if tri < 1.0 else '#f59e0b')
-            self.status_label.setText(
-                f'<span style="color:{color}">■</span>'
-                f'  Step {step:,} | t={t_sim:.4f} | N={N} | '
-                f'Events={evts:,} | Fiedler={fiedler:.4f} | TRI={tri:.3f}'
-            )
+                step   = snap.get('step', 0) if snap else 0
+                t_sim  = snap.get('t', 0.0) if snap else 0.0
+                evts   = snap.get('total_events', 0) if snap else 0
+                fiedler= snap.get('fiedler', 1.0) if snap else 1.0
+                tri    = snap.get('tri', 0.0) if snap else 0.0
+
+                color = WARN if fiedler < 0.1 else (ACCENT if tri < 1.0 else '#f59e0b')
+                self.status_label.setText(
+                    f'<span style="color:{color}">■</span>'
+                    f'  Step {step:,} | t={t_sim:.4f} | N={N} | '
+                    f'Events={evts:,} | Fiedler={fiedler:.4f} | TRI={tri:.3f}'
+                )
 
         # FPS
         import time
@@ -115,9 +128,11 @@ class SovereignDashboard(QMainWindow):
             self._last_update = now
 
     def _tick_3d(self):
-        if self.tabs.currentIndex() == 2:
+        # ONLY update 3D views when NEW data arrived from engine
+        if self._new_data_arrived and self.tabs.currentIndex() == 2:
             self.tab_surface.update()
             self.tab_topology.update()
+            self._new_data_arrived = False
 
 
 
@@ -132,10 +147,24 @@ class EngineManager(QThread):
     def run(self):
         import subprocess
         import time
+        import os
+        
+        import os
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        cwd_path = os.path.join(base_dir, "build")
+        exe_path = os.path.join(cwd_path, "sovereign.exe")
+        
         while self.running:
-            self.proc = subprocess.Popen(["build\\sovereign.exe", "--assets", "10", "--steps", "3000", "--dt", "0.001"],
-                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            self.proc.wait()
+            try:
+                # Run the full 50-asset simulation.
+                self.proc = subprocess.Popen(
+                    [exe_path, "--assets", "50", "--steps", "500000", "--dt", "0.00002"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    cwd=cwd_path
+                )
+                self.proc.wait()
+            except Exception as e:
+                print(f"Engine launch failed: {e}")
             time.sleep(1)
 
     def stop(self):
@@ -152,10 +181,11 @@ def main():
     app = QApplication(sys.argv)
     app.setFont(QFont('Consolas', 9))
 
-    path = sys.argv[1] if len(sys.argv) > 1 else 'sim_state.json'
+    path = sys.argv[1] if len(sys.argv) > 1 else 'build/sim_state.json'
     win = SovereignDashboard(sim_path=path)
     win.show()
 
+    # Auto-start engine in background
     engine = EngineManager()
     engine.start()
 

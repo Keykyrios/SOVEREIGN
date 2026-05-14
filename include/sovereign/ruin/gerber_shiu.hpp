@@ -30,10 +30,13 @@ class RuinEngine {
 
     // Claim history for each asset
     struct ClaimHistory {
+        static constexpr int MAX_CLAIMS = 1000;
         std::vector<double> times;
         std::vector<double> sizes;
+        int head = 0;
         double total_claims = 0;
         int n_claims = 0;
+        ClaimHistory() : times(MAX_CLAIMS, 0.0), sizes(MAX_CLAIMS, 0.0) {}
     };
     std::vector<ClaimHistory> claims_;
 
@@ -44,11 +47,11 @@ class RuinEngine {
                            double premium_rate) const
     {
         if (premium_rate <= claim_rate * mean_claim) return 1.0; // Net loss
-        // Exponential claims: R = (c - λμ)/(c·μ) simplified
-        double safety_loading = premium_rate / (claim_rate * mean_claim) - 1.0;
-        if (safety_loading <= 0) return 1.0;
-        double R = safety_loading / mean_claim;
-        double psi_0 = 1.0 / (1.0 + safety_loading);  // Ψ(0)
+        // Exponential claims: R = θ/((1+θ)·μ)  [Gerber & Shiu 1998 Eq 2.22]
+        double theta = premium_rate / (claim_rate * mean_claim) - 1.0;
+        if (theta <= 0) return 1.0;
+        double R = theta / ((1.0 + theta) * mean_claim);  // CORRECT per paper
+        double psi_0 = 1.0 / (1.0 + theta);  // Ψ(0)
         return psi_0 * std::exp(-R * u);
     }
 
@@ -77,18 +80,27 @@ class RuinEngine {
                 // p(x) = (1/μ)·exp(-x/μ) for exponential claims
                 double conv = 0;
                 for (int j = 0; j < i; ++j) {
-                    double xj = j * du;
-                    conv += phi[i - j] * std::exp(-xj / mean_claim) / mean_claim * du;
+                    double xj = (i - j) * du;
+                    conv += phi[j] * std::exp(-xj / mean_claim) / mean_claim * du;
                 }
 
                 // ω(u) = ∫_u^∞ w(u, x-u)·p(x)dx ≈ exp(-u/μ)/μ
                 double omega = std::exp(-ui / mean_claim) / mean_claim;
 
-                // IDE discretization: Φ'(u) ≈ (Φ(u) - Φ(u-du))/du
-                // (λ+δ)Φ(u) = c·(Φ(u)-Φ(u-du))/du + λ·conv + λ·ω
-                double rhs = premium_rate * phi_new[i - 1] / du
-                           + claim_rate * conv + claim_rate * omega;
-                phi_new[i] = rhs / (claim_rate + delta + premium_rate / du);
+                // IDE discretization: c·Φ'(u) - (λ+δ)Φ(u) + λ·conv + λ·ω = 0
+                // c·(Φ(u) - Φ(u-du))/du - (λ+δ)Φ(u) + λ·conv + λ·ω = 0
+                // Φ(u)·(c/du - (λ+δ)) = c·Φ(u-du)/du - λ·conv - λ·ω
+                double rhs = premium_rate * phi[i - 1] / du
+                           - claim_rate * conv - claim_rate * omega;
+                double denom = premium_rate / du - (claim_rate + delta);
+                
+                // If denominator <= 0, process is structurally doomed (premium too low)
+                if (denom <= 1e-10) {
+                    phi_new[i] = 1.0;
+                } else {
+                    phi_new[i] = rhs / denom;
+                    phi_new[i] = std::clamp(phi_new[i], 0.0, 1.0);
+                }
             }
 
             // Check convergence
@@ -96,10 +108,11 @@ class RuinEngine {
             for (int i = 0; i <= N_GRID; ++i)
                 diff += std::abs(phi_new[i] - phi[i]);
             phi = phi_new;
-            if (diff < 1e-8) break;
+            if (diff < 1e-8) return phi[N_GRID];
         }
 
-        return phi[N_GRID];
+        // Divergence Fallback: Picard iteration failed to converge
+        return 0.99;
     }
 
 public:
@@ -114,10 +127,16 @@ public:
 
     /// Process adverse selection event as a "claim" against surplus
     void register_claim(int asset, double time, double size) {
-        claims_[asset].times.push_back(time);
-        claims_[asset].sizes.push_back(size);
-        claims_[asset].total_claims += size;
-        claims_[asset].n_claims++;
+        auto& c = claims_[asset];
+        if (c.n_claims >= ClaimHistory::MAX_CLAIMS) {
+            c.total_claims -= c.sizes[c.head];
+        } else {
+            c.n_claims++;
+        }
+        c.times[c.head] = time;
+        c.sizes[c.head] = size;
+        c.total_claims += size;
+        c.head = (c.head + 1) % ClaimHistory::MAX_CLAIMS;
         surplus_(asset) -= size;
     }
 
@@ -134,12 +153,10 @@ public:
             double premium_rate = eff_spread * fill_rate;
             surplus_(i) += premium_rate * dt;
 
-            // Adverse selection claims — triggered by jumps exceeding 5 diffusive standard deviations
-            double abs_ret  = std::abs(a.return_1);
-            double threshold = 5.0 * a.volatility * std::sqrt(std::max(dt, 1e-8));
-            if (abs_ret > threshold && threshold > 1e-10) {
-                // Tiny claim: 0.1% of surplus per event
-                double claim = std::min(abs_ret * cfg_.initial_surplus * 0.001,
+            // Adverse selection claims — only during actual book exhaustion
+            double lob_stress = std::abs(a.lob_impact) * 1e4;
+            if (lob_stress > 10.0) {  // crisis-level book walkthrough only
+                double claim = std::min(lob_stress * cfg_.initial_surplus * 0.0001,
                                        cfg_.initial_surplus * 0.001);
                 register_claim(i, state.t, claim);
             }
@@ -153,15 +170,29 @@ public:
             surplus_(i) = std::max(surplus_(i), -cfg_.initial_surplus * 10);
             a.surplus = surplus_(i);
 
-            // Only compute ruin probability once we have meaningful history
-            if (state.t < 0.01 || claims_[i].n_claims < 2) {
+            // Only compute ruin probability with enough statistical data
+            if (state.t < 0.1 || claims_[i].n_claims < 5) {
                 ruin_prob_(i) = 0.0;
                 a.ruin_prob = 0.0;
                 continue;
             }
 
-            double claim_rate = static_cast<double>(claims_[i].n_claims) / state.t;
-            double mean_claim = claims_[i].total_claims / claims_[i].n_claims;
+            // Claim rate: use ring buffer window when full, else global time
+            auto& ch = claims_[i];
+            double window;
+            if (ch.n_claims >= ClaimHistory::MAX_CLAIMS) {
+                // Buffer wrapped: use actual ring buffer time span
+                double t_oldest = ch.times[ch.head];
+                double t_newest = ch.times[(ch.head - 1 + ClaimHistory::MAX_CLAIMS)
+                                           % ClaimHistory::MAX_CLAIMS];
+                window = std::max(t_newest - t_oldest, dt);
+            } else {
+                // Buffer not full: use global sim time
+                window = std::max(state.t, dt);
+            }
+            int effective_claims = std::min(ch.n_claims, ClaimHistory::MAX_CLAIMS);
+            double claim_rate = static_cast<double>(effective_claims) / window;
+            double mean_claim = ch.total_claims / ch.n_claims;
 
             ruin_prob_(i) = cramer_lundberg(
                 std::max(surplus_(i), 0.0), claim_rate, mean_claim, premium_rate);
@@ -177,7 +208,16 @@ public:
             }
         }
 
-        state.ruin_vector = ruin_prob_;
+        // Blend local ruin into global contagion vector with decay.
+        // Old cwiseMax was a one-way ratchet (ruin could never decrease).
+        // Now: ruin_vector exponentially decays toward local ruin_prob_
+        // Exact analytical integration prevents Explicit Euler explosions when decay_rate * dt > 1
+        double decay_rate = 5.0;  // reversion speed to local fundamental risk
+        double exp_decay = std::exp(-decay_rate * dt);
+        for (int i = 0; i < N_; ++i) {
+            state.ruin_vector(i) = ruin_prob_(i) + (state.ruin_vector(i) - ruin_prob_(i)) * exp_decay;
+            state.ruin_vector(i) = std::clamp(state.ruin_vector(i), 0.0, 1.0);
+        }
     }
 
     const Eigen::VectorXd& surplus() const { return surplus_; }

@@ -61,33 +61,57 @@ def mkplot(title='', xl='', yl='', yrange=None):
 
 class SimData:
     """
-    Reads sim_state.json produced by sovereign::TelemetryWriter.
+    Reads telemetry from sovereign::TelemetryWriter via UDP.
     All data comes directly from the C++ engine — nothing generated here.
     """
-    def __init__(self, path='sim_state.json'):
-        self.path   = path
+    def __init__(self, path='sim_state.json', port=8080):
+        self.path   = path # Kept for signature compatibility
+        import socket
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # Increase receive buffer to prevent dropping large payload datagrams
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
+        try:
+            self.sock.bind(("127.0.0.1", port))
+        except OSError:
+            pass # already bound by another instance?
+        self.sock.setblocking(False)
+        
         self.snap   = None
         self.hist   = []
         self.maxhist= 1000
-        self._mtime = 0.0
 
     def poll(self) -> bool:
         """Return True if new snapshot loaded."""
-        try:
-            if not os.path.exists(self.path): return False
-            mt = os.path.getmtime(self.path)
-            if mt == self._mtime: return False
-            self._mtime = mt
-            with open(self.path,'r') as f: raw = f.read().strip()
-            if not raw or raw in ('{}','[]',''): return False
-            s = json.loads(raw)
-            if not s: return False
-            self.snap = s
-            self.hist.append(s)
-            if len(self.hist) > self.maxhist: self.hist.pop(0)
-            return True
-        except Exception:
-            return False
+        import json
+        updated = False
+        while True:
+            try:
+                data, _ = self.sock.recvfrom(65536)
+                raw = data.decode('utf-8')
+                if not raw: continue
+                s = json.loads(raw)
+                
+                # Bulletproof check: handle new simulations and duplicates
+                new_step = s.get('step', -1)
+                old_step = self.snap.get('step', -1) if self.snap else -2
+                
+                if new_step == old_step:
+                    continue
+                elif new_step < old_step:
+                    # A new simulation run has started! 
+                    # Clear the history so we don't wait for step to catch up.
+                    self.hist.clear()
+                    
+                self.snap = s
+                self.hist.append(s)
+                if len(self.hist) > self.maxhist: self.hist.pop(0)
+                updated = True
+            except BlockingIOError:
+                break
+            except Exception:
+                # Json decode error on truncated packet, ignore
+                break
+        return updated
 
     # ── Accessors ──────────────────────────────────────────────────────────
 

@@ -16,26 +16,40 @@ class ContagionEngine {
     const TopologyConfig& cfg_;
     int N_;
 
+    // Cached LLT — only recomputed when topology changes
+    Eigen::LLT<Eigen::MatrixXd> cached_llt_;
+    bool llt_valid_ = false;
+
 public:
     ContagionEngine(const TopologyConfig& cfg, int n_assets)
         : cfg_(cfg), N_(n_assets) {}
 
-    /// Diffuse ruin probability through the correlation network
-    void step(SimulationState& state, double dt) {
-        // Build Laplacian from correlation
-        Eigen::MatrixXd W = state.correlation.cwiseMax(0.0);
-        for (int i = 0; i < N_; ++i) W(i, i) = 0;
+    /// Signal that topology has changed and LLT needs recomputation
+    void invalidate_cache() { llt_valid_ = false; }
 
-        Eigen::MatrixXd L = Eigen::MatrixXd::Zero(N_, N_);
-        for (int i = 0; i < N_; ++i) {
-            L(i, i) = W.row(i).sum();
-            for (int j = 0; j < N_; ++j)
-                if (i != j) L(i, j) = -W(i, j);
+    /// Diffuse ruin probability through the correlation network.
+    /// Uses Implicit Euler: (I + D·dt·L)·Γ(t+dt) = Γ(t)
+    /// Unconditionally stable — no CFL constraint on dt.
+    void step(SimulationState& state, double dt) {
+        if (!llt_valid_) {
+            // Build Laplacian from correlation
+            Eigen::MatrixXd W = state.correlation.cwiseMax(0.0);
+            for (int i = 0; i < N_; ++i) W(i, i) = 0;
+
+            Eigen::MatrixXd L = Eigen::MatrixXd::Zero(N_, N_);
+            for (int i = 0; i < N_; ++i) {
+                L(i, i) = W.row(i).sum();
+                for (int j = 0; j < N_; ++j)
+                    if (i != j) L(i, j) = -W(i, j);
+            }
+
+            Eigen::MatrixXd A = Eigen::MatrixXd::Identity(N_, N_)
+                              + cfg_.contagion_diffusivity * dt * L;
+            cached_llt_.compute(A);
+            llt_valid_ = true;
         }
 
-        // Explicit Euler: Γ(t+dt) = Γ(t) - D·dt·L·Γ(t)
-        Eigen::VectorXd dGamma = -cfg_.contagion_diffusivity * dt * L * state.ruin_vector;
-        state.ruin_vector += dGamma;
+        state.ruin_vector = cached_llt_.solve(state.ruin_vector);
 
         // Clamp to [0, 1]
         for (int i = 0; i < N_; ++i) {

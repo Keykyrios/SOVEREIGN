@@ -27,6 +27,9 @@ class CGMYEngine {
     // CIR subordinator state per asset
     Eigen::VectorXd y_cir_;
 
+    // Persistent per-thread RNGs (forked once, not per-tick)
+    std::vector<Xoshiro256> thread_rngs_;
+
     // Accumulated time-change per asset
     Eigen::VectorXd tau_;
 
@@ -63,10 +66,10 @@ class CGMYEngine {
 
         // ── Small jumps: Gaussian approximation ──
         // Variance of small jumps: 2C·∫_0^ε x^{1-Y} dx = 2C·ε^{2-Y}/(2-Y)
-        double small_var = 2.0 * C * std::pow(epsilon, 2.0 - Y) / (2.0 - Y) * dt;
+        double safe_Y = std::min(Y, 1.95); // Prevent divergence as Y -> 2
+        double small_var = 2.0 * C * std::pow(epsilon, 2.0 - safe_Y) / (2.0 - safe_Y) * dt;
         // Mean of small jumps (drift correction)
-        double small_mean = C * (std::pow(epsilon, 1.0 - Y) / (1.0 - Y))
-                          * (1.0 / M - 1.0 / G) * dt;
+        double small_mean = C * (G - M) * std::pow(epsilon, 2.0 - safe_Y) / (2.0 - safe_Y) * dt;
         jump_sum += small_mean + std::sqrt(small_var) * rng.normal();
 
         return jump_sum;
@@ -81,14 +84,14 @@ class CGMYEngine {
     }
 
     /// Sample from tempered stable tail (rejection sampling)
-    double sample_tempered_stable_tail(double C, double decay, double Y,
+    double sample_tempered_stable_tail(double /*C*/, double decay, double Y,
                                         double eps, Xoshiro256& rng) const
     {
         // Rejection from Pareto proposal: f(x) ∝ x^{-(1+Y)} for x ≥ ε
         // with exponential tilt acceptance: accept with prob exp(-decay·(x-ε))
         for (int attempt = 0; attempt < 10000; ++attempt) {
             // Sample from Pareto(ε, Y): x = ε·U^{-1/Y}
-            double u = rng.uniform();
+            double u = 1.0 - rng.uniform();  // (0,1] for Pareto inversion
             double x = eps * std::pow(u, -1.0 / Y);
             // Accept with prob exp(-decay·(x - ε))
             if (rng.uniform() < std::exp(-decay * (x - eps))) {
@@ -100,16 +103,16 @@ class CGMYEngine {
 
     int sample_poisson(double lambda, Xoshiro256& rng) const {
         if (lambda < 30.0) {
-            // Knuth's algorithm
+            // Knuth's algorithm (correct form: k=0, test THEN increment)
             double L = std::exp(-lambda);
-            int k = 0;
+            int k = -1;
             double p = 1.0;
             do { ++k; p *= rng.uniform(); } while (p > L);
-            return k - 1;
+            return k;
         } else {
-            // Normal approximation
-            return std::max(0, static_cast<int>(
-                std::round(lambda + std::sqrt(lambda) * rng.normal())));
+            // Normal approximation for large lambda
+            int k = static_cast<int>(std::round(lambda + std::sqrt(lambda) * rng.normal()));
+            return k > 0 ? k : 0; // Prevent std::max skewing the statistical distribution median by wrapping negatives blindly.
         }
     }
 
@@ -121,18 +124,43 @@ public:
         tau_   = Eigen::VectorXd::Zero(N_);
     }
 
-    /// Advance CGMY jumps + CIR subordinator by dt
-    void step(SimulationState& state, double dt, Xoshiro256& rng) {
+    /// Must be called once after construction with the global RNG
+    void init_thread_rngs(Xoshiro256& rng) {
+        thread_rngs_.resize(N_);
+        for (int i = 0; i < N_; ++i) thread_rngs_[i] = rng.fork();
+    }
+
+    void step(SimulationState& state, double dt, Xoshiro256& global_rng) {
         double sqrt_dt = std::sqrt(dt);
 
+        // SYSTEMIC JUMP FACTOR: A market-wide jump (e.g., flash crash) affecting all assets.
+        // Simulate one systemic jump component, drawn from a master CGMY process.
+        double systemic_jump = sample_cgmy(cfg_.C * 0.5, cfg_.G, cfg_.M, cfg_.Y, dt, global_rng);
+
+        #pragma omp parallel for
         for (int i = 0; i < N_; ++i) {
             auto& a = state.assets[i];
+            Xoshiro256& local_rng = thread_rngs_[i];
 
-            // ── CIR subordinator: dy = κ(η - y)dt + λ√y dW ──
-            double dW = rng.normal() * sqrt_dt;
-            double dy = cfg_.cir_kappa * (cfg_.cir_eta - y_cir_(i)) * dt
-                      + cfg_.cir_lambda * std::sqrt(std::max(y_cir_(i), 0.0)) * dW;
-            y_cir_(i) = std::max(y_cir_(i) + dy, 0.0);
+            // ── CIR subordinator: Alfonsi implicit (no truncation bias) ──
+            // Enforce Feller condition (2*kappa*eta > lambda^2) dynamically
+            double lambda_eff = cfg_.cir_lambda;
+            if (2.0 * cfg_.cir_kappa * cfg_.cir_eta <= lambda_eff * lambda_eff) {
+                // Throttle volatility to prevent reaching 0
+                lambda_eff = std::sqrt(1.99 * cfg_.cir_kappa * cfg_.cir_eta);
+            }
+            
+            // y_{t+dt} = ((√y_t + λ/2·dW) / (1 + κ/2·dt))²
+            double dW = local_rng.normal() * sqrt_dt;
+            // Removed std::max(0.0) clamp because Feller condition guarantees strict positivity
+            double numer = std::sqrt(y_cir_(i)) + 0.5 * lambda_eff * dW;
+            double denom = 1.0 + 0.5 * cfg_.cir_kappa * dt;
+            y_cir_(i) = (numer * numer) / (denom * denom);
+            // Add drift correction for mean-reversion and Itô shift
+            double ito_correction = 0.25 * lambda_eff * lambda_eff;
+            y_cir_(i) += (cfg_.cir_kappa * cfg_.cir_eta - ito_correction) * dt / denom;
+            // Final safety net, though mathematically unreached due to Feller
+            y_cir_(i) = std::max(y_cir_(i), 1e-8);
 
             // Accumulated operational time
             double d_tau = y_cir_(i) * dt;
@@ -143,16 +171,36 @@ public:
             double regime_scale = 1.0 + 0.5 * (a.regime - 2);  // regime 2 = normal
             double C_eff = cfg_.C * std::max(regime_scale, 0.1);
 
-            double jump = sample_cgmy(C_eff, cfg_.G, cfg_.M, cfg_.Y, d_tau, rng);
+            // Asset jump is an idiosyncratic jump plus beta * systemic jump
+            double idio_jump = sample_cgmy(C_eff, cfg_.G, cfg_.M, cfg_.Y, d_tau, local_rng);
+            double beta_jump = 0.5; // Sensitivity to market-wide crash
+            double jump = idio_jump + beta_jump * systemic_jump;
 
-            // Apply jump to log-price
-            a.log_price += jump;
+            // Full CGMY Laplace exponent compensator for martingale property.
+            // For S=exp(X) to be a martingale: drift = -ψ(-1) where
+            // ψ(u) = C·Γ(-Y)·[(M-u)^Y - M^Y + (G+u)^Y - G^Y]
+            // So ψ(-1) = C·Γ(-Y)·[(M+1)^Y - M^Y + (G-1)^Y - G^Y]
+            // This compensates BOTH large compound Poisson AND small Gaussian jumps.
+            // We expand the 1.95 cap asymptotically for true divergence as Y->2.
+            double safe_Y = std::min(cfg_.Y, 1.99); // Allow closer to 2.0 without complete Inf blowup
+            double neg_gamma_Y = 1.0 / (safe_Y * (safe_Y - 1.0)); // Γ(-Y) approx for Y∈(1,2)
+            // Guard: G must be > 1 for (G-1)^Y to be real and positive
+            double G_safe = std::max(cfg_.G, 1.01);
+            double psi_neg1 = C_eff * neg_gamma_Y * (
+                std::pow(cfg_.M + 1.0, safe_Y) - std::pow(cfg_.M, safe_Y)
+              + std::pow(G_safe - 1.0, safe_Y) - std::pow(G_safe, safe_Y)
+            );
+            // Scale by operational time (CIR subordinator)
+            double compensator = -psi_neg1 * d_tau;
+            a.log_price += jump + compensator;
             a.jump_component = jump;
+
+            // Guardrail: prevent log_price from hitting exp() overflow
+            // ±10 from initial log(100)≈4.6 allows price range [~0.005, ~2.2M]
+            a.log_price = std::clamp(a.log_price, -10.0, 15.0);
 
             // Update price
             double new_price = std::exp(a.log_price);
-            double ret = (new_price - a.price) / a.price;
-            a.return_1 += ret;  // Accumulate with diffusive return
             a.price = new_price;
         }
     }

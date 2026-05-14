@@ -50,62 +50,94 @@ public:
         Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> solver(L);
         auto evals = solver.eigenvalues();
 
-        // Fiedler = second-smallest eigenvalue (always > 0 for connected graph)
-        state.fiedler_value = (N_ > 1) ? std::max(evals(1), 0.0) : 0.0;
+        // Fiedler = algebraic connectivity (smallest non-zero eigenvalue)
+        state.fiedler_value = 0.0;
+        for (int i = 1; i < N_; ++i) {
+            if (evals(i) > 1e-6) {
+                state.fiedler_value = evals(i);
+                break;
+            }
+        }
 
         compute_betweenness(state, graphs);
-        compute_clustering(state);
+        compute_clustering(state, graphs);
     }
 
     void compute_betweenness(SimulationState& state, const GraphEngine& graphs) const {
         state.betweenness.setZero(N_);
-        const auto& adj = graphs.mst_adjacency();
+        const auto& adj = graphs.pmfg_adjacency();
 
-        // For MST: betweenness of edge (u,v) = n_u * n_v
-        // where n_u, n_v are sizes of subtrees on each side
-        // Vertex betweenness ≈ sum of edge betweennesses through it
-        for (int v = 0; v < N_; ++v) {
-            // BFS from v, count reachable nodes through each neighbor
-            for (int nb : adj[v]) {
-                std::vector<bool> visited(N_, false);
-                visited[v] = true;
-                int count = 0;
-                std::vector<int> queue = {nb};
-                visited[nb] = true;
-                while (!queue.empty()) {
-                    std::vector<int> next;
-                    for (int u : queue) {
-                        count++;
-                        for (int w : adj[u])
-                            if (!visited[w]) { visited[w] = true; next.push_back(w); }
+        // Brandes' Algorithm for exact Betweenness Centrality on graphs with cycles
+        for (int s = 0; s < N_; ++s) {
+            std::vector<int> S;
+            std::vector<std::vector<int>> P(N_);
+            std::vector<double> sigma(N_, 0.0);
+            sigma[s] = 1.0;
+            std::vector<int> d(N_, -1);
+            d[s] = 0;
+            std::vector<int> Q;
+            Q.push_back(s);
+
+            int head = 0;
+            while(head < static_cast<int>(Q.size())) {
+                int v = Q[head++];
+                S.push_back(v);
+                for (int w : adj[v]) {
+                    // w found for the first time?
+                    if (d[w] < 0) {
+                        Q.push_back(w);
+                        d[w] = d[v] + 1;
                     }
-                    queue = std::move(next);
+                    // shortest path to w via v?
+                    if (d[w] == d[v] + 1) {
+                        sigma[w] += sigma[v];
+                        P[w].push_back(v);
+                    }
                 }
-                state.betweenness(v) += count * (N_ - count);
+            }
+
+            std::vector<double> delta(N_, 0.0);
+            while(!S.empty()) {
+                int w = S.back();
+                S.pop_back();
+                for (int v : P[w]) {
+                    delta[v] += (sigma[v] / sigma[w]) * (1.0 + delta[w]);
+                }
+                if (w != s) {
+                    state.betweenness(w) += delta[w];
+                }
             }
         }
-        // Normalize
-        double max_b = state.betweenness.maxCoeff();
-        if (max_b > 0) state.betweenness /= max_b;
+
+        // For undirected graphs, divide by 2
+        state.betweenness /= 2.0;
+
+        // Normalize to [0, 1] using theoretical maximum for N nodes
+        // Do NOT normalize dynamically per-tick, which erases macro-structural shifts!
+        if (N_ > 2) {
+            double theoretical_max = (N_ - 1.0) * (N_ - 2.0) / 2.0;
+            state.betweenness /= theoretical_max;
+        }
     }
 
-    void compute_clustering(SimulationState& state) const {
+    void compute_clustering(SimulationState& state, const GraphEngine& graphs) const {
         double total = 0;
+        const auto& adj = graphs.pmfg_adjacency();
         for (int i = 0; i < N_; ++i) {
-            int ki = static_cast<int>(state.degree(i));
+            int ki = adj[i].size(); // Combinatorial degree
             if (ki < 2) continue;
             int triangles = 0;
-            // Count triangles through i using correlation threshold
-            for (int j = 0; j < N_; ++j) {
-                if (j == i || state.correlation(i, j) < 0.3) continue;
-                for (int k = j + 1; k < N_; ++k) {
-                    if (k == i) continue;
-                    if (state.correlation(i, k) > 0.3 &&
-                        state.correlation(j, k) > 0.3)
+            // Count actual triangles in the graph
+            for (int j : adj[i]) {
+                for (int k : adj[i]) {
+                    if (j >= k) continue;
+                    // Check if j and k are connected
+                    if (std::find(adj[j].begin(), adj[j].end(), k) != adj[j].end()) {
                         triangles++;
+                    }
                 }
             }
-            total += 2.0 * triangles / (ki * (ki - 1) + 1e-10);
+            total += 2.0 * triangles / (ki * (ki - 1));
         }
         state.clustering_coeff = total / N_;
     }

@@ -6,6 +6,11 @@
 #include <string>
 #include <cstring>
 
+#if defined(__x86_64__) || defined(_M_X64)
+#include <xmmintrin.h>
+#include <pmmintrin.h>
+#endif
+
 void print_usage() {
     std::cout << "Usage: sovereign [OPTIONS]\n"
               << "  --config <path>   Load config from JSON file\n"
@@ -18,6 +23,13 @@ void print_usage() {
 }
 
 int main(int argc, char* argv[]) {
+#if defined(__x86_64__) || defined(_M_X64)
+    // Enable FTZ (Flush-To-Zero) and DAZ (Denormals-Are-Zero) to prevent
+    // 100x latency stalls when Hawkes intensities decay to subnormal floats.
+    _MM_SET_FLUSH_ZERO_MODE(_MM_FLUSH_ZERO_ON);
+    _MM_SET_DENORMALS_ZERO_MODE(_MM_DENORMALS_ZERO_ON);
+#endif
+    
     sovereign::SimulationConfig cfg;
 
     // Parse CLI
@@ -95,7 +107,6 @@ int main(int argc, char* argv[]) {
 
     // Final report
     const auto& state = engine.state();
-    int N = cfg.universe.n_assets;
 
     std::cout << "\n── Final State Summary ──────────────────────\n";
 

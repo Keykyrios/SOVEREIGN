@@ -10,8 +10,8 @@
 namespace sovereign {
 
 struct LOBState {
-    Eigen::VectorXd bid_volumes;
-    Eigen::VectorXd ask_volumes;
+    Eigen::VectorXi bid_volumes;
+    Eigen::VectorXi ask_volumes;
     Eigen::VectorXd bid_prices;
     Eigen::VectorXd ask_prices;
     double best_bid = 0, best_ask = 0, mid_price = 0, spread = 0;
@@ -22,7 +22,8 @@ struct LOBState {
         bid_prices.setZero(M);  ask_prices.setZero(M);
     }
     double imbalance() const {
-        double b = bid_volumes.head(5).sum(), a = ask_volumes.head(5).sum();
+        double b = bid_volumes.head(5).cast<double>().sum();
+        double a = ask_volumes.head(5).cast<double>().sum();
         return (b - a) / (b + a + 1e-15);
     }
     double microprice() const {
@@ -31,7 +32,8 @@ struct LOBState {
     }
 };
 
-struct AssetState {
+struct alignas(64) AssetState {
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     int id = 0; double t = 0;
     // Layer 1
     double price = 100, log_price = 0, variance = 0.04, volatility = 0.2;
@@ -54,9 +56,10 @@ struct AssetState {
     }
 };
 
-struct SimulationState {
+struct alignas(64) SimulationState {
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     double t = 0; int step = 0;
-    std::vector<AssetState> assets;
+    std::vector<AssetState, Eigen::aligned_allocator<AssetState>> assets;
     // Layer 6: Cross-asset
     Eigen::MatrixXd correlation, raw_correlation, distance;
     Eigen::VectorXd eigenvalues;
@@ -79,8 +82,7 @@ struct SimulationState {
             assets[i].init(i, cfg.universe.initial_prices[i], M, hd);
             assets[i].surplus = cfg.ruin.initial_surplus;
         }
-        correlation = Eigen::MatrixXd::Constant(N, N, 0.3);
-        correlation.diagonal().setOnes();
+        correlation = Eigen::MatrixXd::Identity(N, N);
         raw_correlation = correlation;
         distance = Eigen::MatrixXd::Zero(N, N);
         eigenvalues = Eigen::VectorXd::Ones(N);

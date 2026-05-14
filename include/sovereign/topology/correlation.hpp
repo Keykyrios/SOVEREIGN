@@ -37,30 +37,39 @@ class CorrelationEngine {
         return {std::max(lm, 0.0), lp};
     }
 
-    /// Optimal RIE shrinkage (Bun et al. Eq. 45-50)
-    /// ξ(λ) = λ / |1 - Q⁻¹ + Q⁻¹·λ·g(λ)|²
-    /// where g(z) is the Stieltjes transform of MP law
-    double rie_shrinkage(double lambda, double Q, double sigma2) const {
-        // Simplified RIE: linear shrinkage toward grand mean
+    /// Trace-preserving MP eigenvalue clipping (Bouchaud & Potters).
+    /// Noise eigenvalues (below lambda_+) are replaced with their mean.
+    /// Signal eigenvalues are kept. Total trace is preserved.
+    void clip_eigenvalues(Eigen::VectorXd& evals, double Q, double sigma2) const {
         auto [lm, lp] = mp_edges(sigma2, Q);
-        if (lambda <= lp) {
-            // Noise eigenvalue → shrink to MP mean = σ²
-            double alpha_shrink = (lp - lambda) / (lp - lm + 1e-10);
-            return sigma2 * (1.0 - alpha_shrink) + lambda * alpha_shrink * 0.5;
+        int n_noise = 0;
+        double noise_trace = 0, signal_trace = 0;
+        for (int i = 0; i < evals.size(); ++i) {
+            if (evals(i) <= lp) {
+                noise_trace += evals(i);
+                n_noise++;
+            } else {
+                signal_trace += evals(i);
+            }
         }
-        // Signal eigenvalue → keep (with mild regularization)
-        return lambda * 0.95 + sigma2 * 0.05;
+        // Trace-preserving MP clipping
+        double noise_replacement = (n_noise > 0) ? noise_trace / n_noise : sigma2;
+        for (int i = 0; i < evals.size(); ++i) {
+            if (evals(i) <= lp) {
+                evals(i) = noise_replacement;
+            }
+        }
     }
 
 public:
     CorrelationEngine(const TopologyConfig& cfg, int n_assets)
         : cfg_(cfg), N_(n_assets)
     {
-        double base_corr = 0.3;
-        cov_ewma_ = Eigen::MatrixXd::Constant(N_, N_, base_corr * 0.04);
-        for (int i = 0; i < N_; ++i) cov_ewma_(i, i) = 0.04;
-        
-        vol_ewma_ = Eigen::VectorXd::Constant(N_, 0.2);
+        // Initialize covariance to near-zero identity.
+        // DO NOT seed with fake uniform correlation!
+        // The EWMA will build up the TRUE covariance from actual returns.
+        cov_ewma_ = Eigen::MatrixXd::Identity(N_, N_) * 1e-10;
+        vol_ewma_ = Eigen::VectorXd::Constant(N_, 1e-5);
         mean_ewma_ = Eigen::VectorXd::Zero(N_);
     }
 
@@ -69,8 +78,15 @@ public:
         Eigen::VectorXd r = state.returns();
         samples_++;
 
-        // EWMA update of mean and covariance
-        double a = cfg_.ewma_alpha;
+        // Adaptive warm-up alpha:
+        // For the first 2*N samples, use simple running average (1/t)
+        // so the matrix converges from actual data, not from a fake seed.
+        // After warm-up, switch to the configured EWMA alpha.
+        int warmup = 2 * N_;  // need at least 2N samples for rank-N covariance
+        double a = (samples_ <= warmup)
+                 ? 1.0 / static_cast<double>(samples_)
+                 : cfg_.ewma_alpha;
+
         mean_ewma_ = (1 - a) * mean_ewma_ + a * r;
         Eigen::VectorXd r_dm = r - mean_ewma_;
         cov_ewma_ = (1 - a) * cov_ewma_ + a * r_dm * r_dm.transpose();
@@ -79,24 +95,34 @@ public:
     /// Run RMT cleaning and eigen-decomposition (periodic)
     void update(SimulationState& state) {
 
-        // Extract volatilities
+        // Extract volatilities — hard floor to prevent NaN cascade
+        constexpr double VOL_FLOOR = 1e-8;
         for (int i = 0; i < N_; ++i)
-            vol_ewma_(i) = std::sqrt(std::max(cov_ewma_(i, i), 1e-15));
+            vol_ewma_(i) = std::sqrt(std::max(cov_ewma_(i, i), VOL_FLOOR * VOL_FLOOR));
 
-        // Raw correlation
+        // Raw correlation — bypass if vol is dead
         Eigen::MatrixXd& corr = state.raw_correlation;
-        for (int i = 0; i < N_; ++i)
-            for (int j = 0; j < N_; ++j)
-                corr(i, j) = cov_ewma_(i, j) / (vol_ewma_(i) * vol_ewma_(j) + 1e-15);
+        for (int i = 0; i < N_; ++i) {
+            for (int j = 0; j < N_; ++j) {
+                if (vol_ewma_(i) < VOL_FLOOR || vol_ewma_(j) < VOL_FLOOR) {
+                    corr(i, j) = (i == j) ? 1.0 : 0.0;  // Identity for dead assets
+                } else {
+                    corr(i, j) = cov_ewma_(i, j) / (vol_ewma_(i) * vol_ewma_(j));
+                    corr(i, j) = std::clamp(corr(i, j), -1.0, 1.0);
+                }
+            }
+        }
 
         // RMT cleaning
         state.correlation = clean_rmt(corr, state.eigenvalues, state.eigenvectors);
 
-        // Distance matrix: d_ij = sqrt(2(1 - ρ_ij))
+        // Distance matrix: d_ij = arccos(ρ_ij) (Riemannian geodesic on hypersphere)
+        // This preserves the metric triangle inequality correctly when summing distances.
         for (int i = 0; i < N_; ++i)
-            for (int j = 0; j < N_; ++j)
-                state.distance(i, j) = std::sqrt(
-                    2.0 * (1.0 - std::min(state.correlation(i, j), 1.0)));
+            for (int j = 0; j < N_; ++j) {
+                double rho = std::clamp(state.correlation(i, j), -1.0, 1.0);
+                state.distance(i, j) = std::acos(rho);
+            }
     }
 
     /// RMT cleaning: eigenvalue shrinkage below MP edge
@@ -104,32 +130,68 @@ public:
                                Eigen::VectorXd& eigenvalues,
                                Eigen::MatrixXd& eigenvectors) const
     {
+        // WARMUP BYPASS: Let the EWMA accumulate enough cross-asset signal
+        // before unleashing the MP cleaner. Without this, the cleaner
+        // activates on pure noise and cleans everything back to Identity.
+        if (samples_ < 2 * N_) {
+            Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> solver(raw);
+            eigenvalues = solver.eigenvalues();
+            eigenvectors = solver.eigenvectors();
+            return raw;  // Return raw correlation — no cleaning yet
+        }
+
         Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> solver(raw);
         eigenvalues = solver.eigenvalues();
         eigenvectors = solver.eigenvectors();
 
-        double Q = std::max(static_cast<double>(samples_) / N_, 1.001);
-        double sigma2 = 1.0;  // Normalized correlation
-
-        // Shrink eigenvalues
-        Eigen::VectorXd cleaned_evals = eigenvalues;
-        for (int i = 0; i < N_; ++i) {
-            cleaned_evals(i) = rie_shrinkage(eigenvalues(i), Q, sigma2);
-            cleaned_evals(i) = std::max(cleaned_evals(i), 1e-6);
+        // Use EFFECTIVE sample count for EWMA, not raw samples_.
+        // EWMA has finite memory: N_eff ≈ 2/α. Using raw samples_ (which → ∞)
+        // collapses the MP noise edge to 1.0 and nukes valid eigen-signals.
+        double N_eff = std::min(2.0 / cfg_.ewma_alpha, static_cast<double>(samples_));
+        double Q = std::max(N_eff / N_, 1.001);
+        // Estimate noise variance from the bottom half of the spectrum
+        double sigma2 = 0.0;
+        int half = N_ / 2;
+        for (int i = half; i < N_; ++i) {
+            sigma2 += eigenvalues(i);
         }
+        sigma2 /= (N_ - half);
+
+        // Trace-preserving MP clipping
+        Eigen::VectorXd cleaned_evals = eigenvalues;
+        clip_eigenvalues(cleaned_evals, Q, sigma2);
+        for (int i = 0; i < N_; ++i)
+            cleaned_evals(i) = std::max(cleaned_evals(i), 1e-6);
+
+        // Do NOT overwrite state eigenvalues with cleaned_evals.
+        // We want the dashboard to show the TRUE distribution (which is heavy-tailed),
+        // not the flat-lined MP cleaned spectrum!
 
         // Reconstruct: C_clean = V · diag(λ_clean) · V^T
         Eigen::MatrixXd cleaned = eigenvectors * cleaned_evals.asDiagonal()
                                 * eigenvectors.transpose();
 
-        // Force unit diagonal (correlation constraint)
-        for (int i = 0; i < N_; ++i) {
-            double d = std::sqrt(cleaned(i, i));
-            for (int j = 0; j < N_; ++j) {
-                cleaned(i, j) /= (d * std::sqrt(cleaned(j, j)) + 1e-15);
-            }
-            cleaned(i, i) = 1.0;
+        // Higham's Alternating Projections for nearest correlation matrix
+        // Preserves the clipped spectrum much better than scalar diagonal division
+        Eigen::MatrixXd Y = cleaned;
+        Eigen::MatrixXd S = Eigen::MatrixXd::Zero(N_, N_);
+        for (int iter = 0; iter < cfg_.spd_max_iter; ++iter) {
+            Eigen::MatrixXd R = Y - S;
+            
+            // P_S: Project onto positive semi-definite cone
+            Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(R);
+            Eigen::VectorXd evals = es.eigenvalues();
+            Eigen::MatrixXd evecs = es.eigenvectors();
+            for (int i = 0; i < N_; ++i) evals(i) = std::max(evals(i), 1e-8);
+            Eigen::MatrixXd X = evecs * evals.asDiagonal() * evecs.transpose();
+            
+            S = X - R;
+            Y = X;
+            
+            // P_U: Project onto unit diagonal (correlation constraint)
+            for (int i = 0; i < N_; ++i) Y(i, i) = 1.0;
         }
+        cleaned = Y;
 
         return cleaned;
     }

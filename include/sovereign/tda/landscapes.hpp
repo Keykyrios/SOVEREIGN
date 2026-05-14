@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <cmath>
 #include <vector>
+#include <iostream>
 
 namespace sovereign {
 
@@ -70,14 +71,16 @@ public:
     /// Topological Risk Index: TRI(t) = Σ (d-b)^p · w(b,d)
     double compute_tri(const PersistenceDiagram& pd) const {
         double tri = 0;
+        int count = 0;
         double p = cfg_.tri_weight_power;
         for (const auto& pair : pd) {
-            if (pair.dimension >= 1) {  // Focus on H₁ features (loops)
-                double pers = pair.persistence();
-                // Weight: features born early and dying late are more important
-                double weight = 1.0 / (1.0 + pair.birth);
-                tri += std::pow(pers, p) * weight;
-            }
+            // Include ALL topological features (H₀ + H₁ + H₂)
+            // H₀ merging persistence captures connectivity fragility
+            // H₁ loops (when available) capture systemic risk cycles
+            double pers = pair.persistence();
+            if (pers < 1e-12) continue;  // Skip zero-persistence noise
+            double weight = 1.0 / (1.0 + pair.birth);
+            tri += std::pow(pers, p) * weight;
         }
         return tri;
     }
@@ -104,32 +107,28 @@ public:
         auto p1 = extract(pd1, 1);
         auto p2 = extract(pd2, 1);
 
-        // Pad shorter one with diagonal points
-        size_t n = std::max(p1.size(), p2.size());
-        while (p1.size() < n) {
-            double mid = p1.empty() ? 0 : (p1.back().first + p1.back().second) / 2;
-            p1.emplace_back(mid, mid);
-        }
-        while (p2.size() < n) {
-            double mid = p2.empty() ? 0 : (p2.back().first + p2.back().second) / 2;
-            p2.emplace_back(mid, mid);
-        }
-
-        // Greedy matching (not optimal, but O(n²) instead of O(n³))
+        // Greedy matching with exact diagonal projection for unmatched points
         double total = 0;
-        std::vector<bool> used(n, false);
-        for (size_t i = 0; i < n; ++i) {
-            double best = 1e20;
-            size_t best_j = 0;
-            for (size_t j = 0; j < n; ++j) {
-                if (used[j]) continue;
+        std::vector<bool> used2(p2.size(), false);
+        for (size_t i = 0; i < p1.size(); ++i) {
+            // Maximum cost is destroying the feature (projecting to diagonal)
+            double best = std::pow(p1[i].second - p1[i].first, 2) / 2.0;
+            int best_j = -1;
+            for (size_t j = 0; j < p2.size(); ++j) {
+                if (used2[j]) continue;
                 double db = p1[i].first - p2[j].first;
                 double dd = p1[i].second - p2[j].second;
                 double d2 = db * db + dd * dd;
-                if (d2 < best) { best = d2; best_j = j; }
+                if (d2 < best) { best = d2; best_j = static_cast<int>(j); }
             }
-            used[best_j] = true;
+            if (best_j != -1) used2[best_j] = true;
             total += best;
+        }
+        // Any remaining unmatched features in p2 must be destroyed
+        for (size_t j = 0; j < p2.size(); ++j) {
+            if (!used2[j]) {
+                total += std::pow(p2[j].second - p2[j].first, 2) / 2.0;
+            }
         }
         return std::sqrt(total);
     }
@@ -146,8 +145,12 @@ public:
         if (!prev.empty())
             state.wasserstein_dist = wasserstein_2(pd, prev);
 
-        // Landscape norms
+        // Landscape norms — use H₁ if available, fall back to H₀
         auto L1 = landscape(pd, 1, 0);  // First H₁ landscape
+        if (L1.squaredNorm() < 1e-20) {
+            // No H₁ features — use H₀ landscape instead
+            L1 = landscape(pd, 0, 0);
+        }
         state.landscape_l1 = lp_norm(L1, 1.0);
         state.landscape_l2 = lp_norm(L1, 2.0);
     }
