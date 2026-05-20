@@ -61,56 +61,106 @@ def mkplot(title='', xl='', yl='', yrange=None):
 
 class SimData:
     """
-    Reads telemetry from sovereign::TelemetryWriter via UDP.
+    Reads telemetry from sovereign::TelemetryWriter via TCP.
+    Protocol: [4-byte LE length][JSON payload] per frame.
+    Python acts as TCP server on 127.0.0.1:8080.
+    The C++ engine connects as a client and streams frames.
     All data comes directly from the C++ engine — nothing generated here.
     """
     def __init__(self, path='sim_state.json', port=8080):
-        self.path   = path # Kept for signature compatibility
-        import socket
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        # Increase receive buffer to prevent dropping large payload datagrams
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 1024 * 1024)
+        import socket, struct
+        self._struct = struct
+        self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
-            self.sock.bind(("127.0.0.1", port))
+            self.server.bind(("127.0.0.1", port))
+            self.server.listen(1)
         except OSError:
-            pass # already bound by another instance?
-        self.sock.setblocking(False)
-        
+            pass  # port already in use — another dashboard instance?
+        self.server.setblocking(False)
+
+        self.client = None
+        self.buffer = b""
         self.snap   = None
         self.hist   = []
         self.maxhist= 1000
 
+    def close(self):
+        """Release the TCP server socket so the port is freed on exit."""
+        try:
+            if self.client:
+                self.client.close()
+                self.client = None
+            self.server.close()
+        except Exception:
+            pass
     def poll(self) -> bool:
         """Return True if new snapshot loaded."""
         import json
-        updated = False
-        while True:
+
+        # Accept new connections from the engine
+        if self.client is None:
             try:
-                data, _ = self.sock.recvfrom(65536)
-                raw = data.decode('utf-8')
-                if not raw: continue
-                s = json.loads(raw)
-                
-                # Bulletproof check: handle new simulations and duplicates
+                self.client, _ = self.server.accept()
+                self.client.setblocking(False)
+                self.buffer = b""
+            except BlockingIOError:
+                pass
+            except Exception:
+                pass
+
+        if self.client is None:
+            return False
+
+        # Read available data from the TCP stream
+        try:
+            chunk = self.client.recv(262144)  # 256KB read buffer
+            if not chunk:
+                # Connection closed by engine (simulation ended or restarted)
+                self.client = None
+                return False
+            self.buffer += chunk
+        except BlockingIOError:
+            pass  # No data available right now — that's fine
+        except (ConnectionResetError, ConnectionAbortedError, OSError):
+            self.client = None
+            return False
+
+        # Parse length-prefixed frames: [4-byte LE uint32][JSON bytes]
+        updated = False
+        while len(self.buffer) >= 4:
+            length = self._struct.unpack('<I', self.buffer[:4])[0]
+            if length > 10_000_000:
+                # Corrupt length — discard buffer and reset connection
+                self.buffer = b""
+                self.client = None
+                break
+            if len(self.buffer) < 4 + length:
+                break  # Incomplete frame — wait for more data
+
+            frame = self.buffer[4:4+length]
+            self.buffer = self.buffer[4+length:]
+
+            try:
+                s = json.loads(frame.decode('utf-8'))
+
                 new_step = s.get('step', -1)
                 old_step = self.snap.get('step', -1) if self.snap else -2
-                
+
                 if new_step == old_step:
                     continue
                 elif new_step < old_step:
-                    # A new simulation run has started! 
-                    # Clear the history so we don't wait for step to catch up.
+                    # A new simulation run has started
                     self.hist.clear()
-                    
+
                 self.snap = s
                 self.hist.append(s)
-                if len(self.hist) > self.maxhist: self.hist.pop(0)
+                if len(self.hist) > self.maxhist:
+                    self.hist.pop(0)
                 updated = True
-            except BlockingIOError:
-                break
-            except Exception:
-                # Json decode error on truncated packet, ignore
-                break
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue  # Corrupted frame — skip
+
         return updated
 
     # ── Accessors ──────────────────────────────────────────────────────────

@@ -36,7 +36,10 @@ struct alignas(64) AssetState {
     EIGEN_MAKE_ALIGNED_OPERATOR_NEW
     int id = 0; double t = 0;
     // Layer 1
-    double price = 100, log_price = 0, variance = 0.04, volatility = 0.2;
+    // NOTE: log_price default must be consistent with price default.
+    // init() always overwrites both, but a stale default of 0 while price=100
+    // would be a 4.6x discrepancy if init() were ever skipped.
+    double price = 100, log_price = 4.605170185988091, variance = 0.04, volatility = 0.2;
     double hurst = 0.1, jump_component = 0, lob_impact = 0;
     int regime = 2;
     // Layer 2

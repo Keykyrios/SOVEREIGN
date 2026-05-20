@@ -55,9 +55,10 @@ class MarkovianFBM {
             double frac = static_cast<double>(k) / (N_FACTORS - 1);
             lambda_[k] = std::exp(log_lam_min + frac * (log_lam_max - log_lam_min));
 
-            // Weight: c_k ∝ λ_k^{γ-1} · Δlog(λ) (quadrature on log-scale)
+            // Weight: c_k ∝ λ_k^{γ-1} · Δlog(λ) (Abi Jaber & El Euch 2019)
+            // γ = 1/2 - H, so γ-1 = -1/2 - H
             double d_log_lam = (log_lam_max - log_lam_min) / (N_FACTORS - 1);
-            c_[k] = sqrt2H * std::pow(lambda_[k], gamma_) * d_log_lam
+            c_[k] = sqrt2H * std::pow(lambda_[k], gamma_ - 1.0) * d_log_lam
                    / std::tgamma(gamma_);
         }
 

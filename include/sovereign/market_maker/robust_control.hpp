@@ -32,7 +32,8 @@ class MarketMakerEngine {
 
     // HJB grid per asset: V(inventory, price_dev)
     struct HJBGrid {
-        EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+        // C++17/20 guarantees over-aligned new, and the vector uses
+        // Eigen::aligned_allocator — EIGEN_MAKE_ALIGNED_OPERATOR_NEW is redundant.
         Eigen::MatrixXd V, delta;
         int ni, np; double inv_max;
         void init(int n, double imax) {

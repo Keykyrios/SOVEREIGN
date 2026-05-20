@@ -273,20 +273,25 @@ public:
             // ── Layer 6: Topology (async dispatch) ────────────
             correlation_.record(state_);
 
-            if (s % topology_interval_ == 0 && s > 0 && !topo_worker_busy_) {
-                // Selective copy OUTSIDE the lock. Front buffer is exclusively owned by main thread.
-                topo_front_->correlation = state_.correlation;
-                topo_front_->distance = state_.distance;
-                topo_front_->ruin_vector = state_.ruin_vector;
-                topo_front_->eigenvalues = state_.eigenvalues;
-                topo_front_->eigenvectors = state_.eigenvectors;
-
+            if (s % topology_interval_ == 0 && s > 0) {
+                bool dispatched = false;
                 {
                     std::lock_guard<std::mutex> lock(topo_mutex_);
-                    std::swap(topo_front_, topo_back_);
-                    topo_pending_ = true;
+                    if (!topo_worker_busy_) {
+                        // Copy into front buffer and swap — all under the lock
+                        // to eliminate the race between busy-check and dispatch.
+                        // For N=50, this copies ~20KB of matrices — negligible.
+                        topo_front_->correlation = state_.correlation;
+                        topo_front_->distance = state_.distance;
+                        topo_front_->ruin_vector = state_.ruin_vector;
+                        topo_front_->eigenvalues = state_.eigenvalues;
+                        topo_front_->eigenvectors = state_.eigenvectors;
+                        std::swap(topo_front_, topo_back_);
+                        topo_pending_ = true;
+                        dispatched = true;
+                    }
                 }
-                topo_cv_.notify_one();
+                if (dispatched) topo_cv_.notify_one();
             }
 
             // ── Callback / Telemetry (BEFORE topo ingestion for consistency) ──

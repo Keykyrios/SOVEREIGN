@@ -150,12 +150,14 @@ public:
         double N_eff = std::min(2.0 / cfg_.ewma_alpha, static_cast<double>(samples_));
         double Q = std::max(N_eff / N_, 1.001);
         // Estimate noise variance from the bottom half of the spectrum
+        // SelfAdjointEigenSolver returns eigenvalues in ASCENDING order,
+        // so indices [0, half) are the smallest (noise) eigenvalues.
         double sigma2 = 0.0;
         int half = N_ / 2;
-        for (int i = half; i < N_; ++i) {
+        for (int i = 0; i < half; ++i) {
             sigma2 += eigenvalues(i);
         }
-        sigma2 /= (N_ - half);
+        sigma2 /= std::max(half, 1);
 
         // Trace-preserving MP clipping
         Eigen::VectorXd cleaned_evals = eigenvalues;

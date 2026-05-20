@@ -1,14 +1,46 @@
+# Build artifacts
 build/
-sim_state.json*
-__pycache__/
-.vs/
-*.exe
-*.a
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
 *.obj
-*.pdf
-*.txt
+*.o
+*.a
+*.lib
+compile_commands.json
+
+# Executables
+*.exe
+*.out
+sovereign
+
+# IDE / Editor
+.vs/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Runtime telemetry (not config)
+sim_state.json
+sim_state.json.tmp
+
+# OS
+Thumbs.db
+.DS_Store
+Desktop.ini
+
+# Project-specific
 vcpkg/
 run_test.bat
 launch.bat
 *.tex
+*.pdf
+*.txt
 *.json

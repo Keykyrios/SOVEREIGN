@@ -32,22 +32,27 @@ int main(int argc, char* argv[]) {
     
     sovereign::SimulationConfig cfg;
 
-    // Parse CLI
+    // Parse CLI into temporaries — do NOT apply yet, config file loads first
     std::string config_path;
     std::string save_config_path;
+    int cli_assets = -1;
+    int cli_steps = -1;
+    double cli_dt = -1;
+    uint64_t cli_seed = 0;
+    bool cli_seed_set = false;
 
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--config") == 0 && i + 1 < argc) {
             config_path = argv[++i];
         } else if (std::strcmp(argv[i], "--assets") == 0 && i + 1 < argc) {
-            cfg.universe.n_assets = std::stoi(argv[++i]);
+            cli_assets = std::stoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--steps") == 0 && i + 1 < argc) {
-            int steps = std::stoi(argv[++i]);
-            cfg.dt = cfg.T / steps;
+            cli_steps = std::stoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--dt") == 0 && i + 1 < argc) {
-            cfg.dt = std::stod(argv[++i]);
+            cli_dt = std::stod(argv[++i]);
         } else if (std::strcmp(argv[i], "--seed") == 0 && i + 1 < argc) {
-            cfg.seed = std::stoull(argv[++i]);
+            cli_seed = std::stoull(argv[++i]);
+            cli_seed_set = true;
         } else if (std::strcmp(argv[i], "--save-config") == 0 && i + 1 < argc) {
             save_config_path = argv[++i];
         } else if (std::strcmp(argv[i], "--help") == 0) {
@@ -56,10 +61,17 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    // Load config from file if specified
+    // Step 1: Load config from file FIRST (establishes baseline T, dt, etc.)
     if (!config_path.empty()) {
         cfg = sovereign::SimulationConfig::from_json(config_path);
     }
+
+    // Step 2: Apply CLI overrides AFTER config load so they always win
+    if (cli_assets > 0) cfg.universe.n_assets = cli_assets;
+    if (cli_steps > 0)  cfg.dt = cfg.T / cli_steps;
+    if (cli_dt > 0)     cfg.dt = cli_dt;
+    if (cli_seed_set)   cfg.seed = cli_seed;
+
     cfg.finalize();
 
     // Save effective config if requested

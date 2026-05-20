@@ -72,6 +72,11 @@ class SovereignDashboard(QMainWindow):
         self.timer_3d.start(33)  # ~30 FPS for 3D surfaces
         self._new_data_arrived = False  # Gate for 3D updates
 
+    def closeEvent(self, event):
+        """Cleanup data connection on window close."""
+        self.data.close()
+        event.accept()
+
     def _on_tab_changed(self, index):
         self._last_rendered_tab = -1
         self._new_data_arrived = True
@@ -139,6 +144,8 @@ class SovereignDashboard(QMainWindow):
 
 
 class EngineManager(QThread):
+    MAX_RETRIES = 5  # Stop spamming after 5 consecutive failures
+
     def __init__(self):
         super().__init__()
         self.running = True
@@ -148,23 +155,34 @@ class EngineManager(QThread):
         import subprocess
         import time
         import os
-        
-        import os
+        import platform
+
         base_dir = os.path.dirname(os.path.abspath(__file__))
         cwd_path = os.path.join(base_dir, "build")
-        exe_path = os.path.join(cwd_path, "sovereign.exe")
-        
+        exe_name = "sovereign.exe" if platform.system() == "Windows" else "sovereign"
+        exe_path = os.path.join(cwd_path, exe_name)
+
+        if not os.path.exists(exe_path):
+            print(f"Engine binary not found: {exe_path}")
+            print("Build the engine first: cmake --build build --config Release")
+            return
+
+        failures = 0
         while self.running:
             try:
-                # Run the full 50-asset simulation.
                 self.proc = subprocess.Popen(
                     [exe_path, "--assets", "50", "--steps", "500000", "--dt", "0.00002"],
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     cwd=cwd_path
                 )
                 self.proc.wait()
+                failures = 0  # Reset on successful run
             except Exception as e:
-                print(f"Engine launch failed: {e}")
+                failures += 1
+                print(f"Engine launch failed ({failures}/{self.MAX_RETRIES}): {e}")
+                if failures >= self.MAX_RETRIES:
+                    print("Max retries reached. Stopping engine manager.")
+                    return
             time.sleep(1)
 
     def stop(self):

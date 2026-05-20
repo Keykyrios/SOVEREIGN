@@ -65,11 +65,12 @@ class CGMYEngine {
         }
 
         // ── Small jumps: Gaussian approximation ──
-        // Variance of small jumps: 2C·∫_0^ε x^{1-Y} dx = 2C·ε^{2-Y}/(2-Y)
+        // Variance of small jumps: 2C·∫_0^ε x^{2}·ν(dx) ≈ 2C·ε^{2-Y}/(2-Y)
         double safe_Y = std::min(Y, 1.95); // Prevent divergence as Y -> 2
         double small_var = 2.0 * C * std::pow(epsilon, 2.0 - safe_Y) / (2.0 - safe_Y) * dt;
-        // Mean of small jumps (drift correction)
-        double small_mean = C * (G - M) * std::pow(epsilon, 2.0 - safe_Y) / (2.0 - safe_Y) * dt;
+        // Mean of small jumps for Y ∈ (1,2):
+        // E[small] = C·(1/(1-Y))·(G-M)·ε^{1-Y}  (NOT ε^{2-Y}/(2-Y))
+        double small_mean = C * (G - M) * std::pow(epsilon, 1.0 - safe_Y) / (1.0 - safe_Y) * dt;
         jump_sum += small_mean + std::sqrt(small_var) * rng.normal();
 
         return jump_sum;
@@ -157,7 +158,9 @@ public:
             double denom = 1.0 + 0.5 * cfg_.cir_kappa * dt;
             y_cir_(i) = (numer * numer) / (denom * denom);
             // Add drift correction for mean-reversion and Itô shift
-            double ito_correction = 0.25 * lambda_eff * lambda_eff;
+            // Use original cfg_.cir_lambda for ito_correction, NOT lambda_eff,
+            // because the Alfonsi scheme was derived with the original parameters.
+            double ito_correction = 0.25 * cfg_.cir_lambda * cfg_.cir_lambda;
             y_cir_(i) += (cfg_.cir_kappa * cfg_.cir_eta - ito_correction) * dt / denom;
             // Final safety net, though mathematically unreached due to Feller
             y_cir_(i) = std::max(y_cir_(i), 1e-8);

@@ -16,13 +16,19 @@ from dashboard import SimData, mkplot, PALETTE, PANEL_BG, GRID
 from dashboard import ACCENT, ACCENT2, ACCENT3, WARN, TEXT
 
 def ewma(x, alpha=0.05):
-    """Simple Exponentially Weighted Moving Average for UI smoothing."""
-    if len(x) == 0: return x
-    s = np.zeros_like(x)
-    s[0] = x[0]
-    for i in range(1, len(x)):
-        s[i] = alpha * x[i] + (1 - alpha) * s[i-1]
-    return s
+    """EWMA via recursive filter — O(n) with Python loop."""
+    if len(x) == 0:
+        return x
+    x = np.asarray(x, dtype=np.float64)
+    n = len(x)
+    weights = (1 - alpha) ** np.arange(n - 1, -1, -1)
+    # cumsum trick: convolve with decaying weights via cumulative sum
+    out = np.empty(n)
+    out[0] = x[0]
+    decay = 1.0 - alpha
+    for i in range(1, n):
+        out[i] = alpha * x[i] + decay * out[i-1]
+    return out
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -448,12 +454,11 @@ class TDATab(QWidget):
         ts_w2  = ewma(self.d.ts('wasserstein'), alpha=0.05)
         ts_l1  = ewma(self.d.ts('l1'), alpha=0.05)
         ts_l2  = ewma(self.d.ts('l2'), alpha=0.05)
-        xs = lambda ts: np.arange(len(ts))
 
-        self.ctri.setData(xs(ts_tri), ts_tri)
-        self.cw2.setData(xs(ts_w2),   ts_w2)
-        self.cl1.setData(xs(ts_l1),   ts_l1)
-        self.cl2.setData(xs(ts_l2),   ts_l2)
+        self.ctri.setData(np.arange(len(ts_tri)), ts_tri)
+        self.cw2.setData(np.arange(len(ts_w2)),   ts_w2)
+        self.cl1.setData(np.arange(len(ts_l1)),   ts_l1)
+        self.cl2.setData(np.arange(len(ts_l2)),   ts_l2)
 
         # Persistence diagram from real distance matrix
         D = self.d.dist_matrix()
@@ -573,7 +578,7 @@ class CrisisTab(QWidget):
         if len(ruin):
             max_ruin_ts = np.array([
                 float(np.max([
-                    h.get('ruin_vector', [0])[j] if j < len(h.get('ruin_vector', []))
+                    h.get('ruin_vector', [0] * N_assets)[j] if j < len(h.get('ruin_vector', [0] * N_assets))
                     else 0 for j in range(N_assets)
                 ])) for h in d.hist
             ]) if d.hist else np.zeros(len(xs))
