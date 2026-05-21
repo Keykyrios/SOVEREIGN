@@ -59,12 +59,15 @@ public:
         return L;
     }
 
-    /// L^p norm of landscape
+    /// L^p norm of landscape (trapezoidal rule)
     double lp_norm(const Eigen::VectorXd& L, double p) const {
         double dx = cfg_.max_filtration / (res_ - 1);
         double sum = 0;
-        for (int i = 0; i < L.size(); ++i)
-            sum += std::pow(std::abs(L(i)), p) * dx;
+        // FIX #7: Trapezoidal rule — half-weight at endpoints.
+        for (int i = 0; i < L.size(); ++i) {
+            double w = (i == 0 || i == L.size() - 1) ? 0.5 : 1.0;
+            sum += w * std::pow(std::abs(L(i)), p) * dx;
+        }
         return std::pow(sum, 1.0 / p);
     }
 

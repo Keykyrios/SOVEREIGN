@@ -167,7 +167,10 @@ public:
 
     /// Passive cancellations: natural decay each timestep and asymmetric replenishment
     void passive_decay(double dt, double macro_price, Xoshiro256& rng) {
-        double drift_speed = 1.0;
+        // FIX (Technical Debt): Increase LOB price tracking speed.
+        // Previously kappa=1.0 lagged significantly during flash crashes.
+        // Increased to 100.0 for tight tracking.
+        double drift_speed = 100.0;
         mid_price_ += drift_speed * (macro_price - mid_price_) * dt;
         mid_price_ = std::round(mid_price_ / tick_) * tick_; // Regulation NMS sub-penny tick enforcement
 

@@ -68,7 +68,12 @@ public:
                 sum2 += Y * Y;
             }
             levels[l].mean = sum / n_init;
-            levels[l].variance = sum2 / n_init - levels[l].mean * levels[l].mean;
+            // FIX #36: Unbiased variance estimator (/(n-1), not /n).
+            // Biased variance underestimates V_l, causing MLMC to underallocate
+            // high-variance levels and increase RMSE above target.
+            levels[l].variance = (n_init > 1)
+                ? (sum2 / n_init - levels[l].mean * levels[l].mean) * n_init / (n_init - 1)
+                : 0.0;
             levels[l].cost = n_init * std::pow(M, l);
         }
 
@@ -89,21 +94,25 @@ public:
             // Additional samples needed
             int n_extra = N_target - levels[l].n_samples;
             if (n_extra > 0) {
-                double sum = levels[l].mean * levels[l].n_samples;
-                double sum2 = (levels[l].variance + levels[l].mean * levels[l].mean)
-                            * levels[l].n_samples;
+                // FIX #35: Use Welford-style online update instead of
+                // reconstructing sum from mean*n (catastrophic cancellation).
+                double running_mean = levels[l].mean;
+                double M2 = levels[l].variance * (levels[l].n_samples - 1);
+                int n_total = levels[l].n_samples;
 
                 for (int s = 0; s < n_extra; ++s) {
                     auto [fine, coarse] = simulate_fn(
                         l, levels[l].h, levels[l].n_samples + s);
                     double Y = (l == 0) ? fine : (fine - coarse);
-                    sum += Y;
-                    sum2 += Y * Y;
+                    n_total++;
+                    double delta = Y - running_mean;
+                    running_mean += delta / n_total;
+                    double delta2 = Y - running_mean;
+                    M2 += delta * delta2;
                 }
                 levels[l].n_samples = N_target;
-                levels[l].mean = sum / N_target;
-                levels[l].variance = sum2 / N_target
-                                   - levels[l].mean * levels[l].mean;
+                levels[l].mean = running_mean;
+                levels[l].variance = (n_total > 1) ? M2 / (n_total - 1) : 0.0;
             }
         }
 

@@ -35,10 +35,9 @@ struct RoughVolConfig {
     double eta            = 0.35;   ///< Vol-of-vol (rBergomi, calibrated range 0.2–0.5)
     double rho            = -0.90;  ///< Spot-vol correlation
     double xi_0           = 0.04;   ///< Forward variance ξ₀(t)
-    int    n_hybrid_steps = 1;      ///< κ: power cells in hybrid scheme
 };
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(RoughVolConfig,
-    hurst, hurst_mean, hurst_kappa, hurst_sigma, eta, rho, xi_0, n_hybrid_steps)
+    hurst, hurst_mean, hurst_kappa, hurst_sigma, eta, rho, xi_0)
 
 // ─── Layer 1.2: CGMY Lévy Jumps ────────────────────────────────────────
 
@@ -99,14 +98,15 @@ NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(LOBConfig,
 struct MarketMakerConfig {
     int    n_market_makers  = 5;
     double gamma            = 2.0;      ///< CRRA risk aversion
-    double theta            = 0.5;      ///< Ambiguity aversion (κ-ignorance)
+    double theta            = 0.5;      ///< Ambiguity aversion (κ-ignorance) — base value
+    double tri_alpha        = 0.1;      ///< TRI→θ coupling: θ(t) = θ₀·exp(α·TRI(t))
     double inventory_limit  = 1000.0;
     int    policy_iter_max  = 100;      ///< Howard's iteration cap
     int    hjb_grid_points  = 200;      ///< Per dimension
     double spread_floor     = 0.01;
 };
 NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT(MarketMakerConfig,
-    n_market_makers, gamma, theta, inventory_limit,
+    n_market_makers, gamma, theta, tri_alpha, inventory_limit,
     policy_iter_max, hjb_grid_points, spread_floor)
 
 // ─── Layer 5: Ruin ─────────────────────────────────────────────────────

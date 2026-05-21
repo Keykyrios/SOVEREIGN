@@ -87,7 +87,11 @@ struct alignas(64) SimulationState {
         }
         correlation = Eigen::MatrixXd::Identity(N, N);
         raw_correlation = correlation;
-        distance = Eigen::MatrixXd::Zero(N, N);
+        // FIX #32: d_ij = arccos(ρ_ij). For identity correlation:
+        // diagonal = arccos(1) = 0, off-diagonal = arccos(0) = π/2.
+        // Old all-zero init caused garbage MST/Fiedler for first 50 ticks.
+        distance = Eigen::MatrixXd::Constant(N, N, M_PI / 2.0);
+        for (int i = 0; i < N; ++i) distance(i, i) = 0.0;
         eigenvalues = Eigen::VectorXd::Ones(N);
         eigenvectors = Eigen::MatrixXd::Identity(N, N);
         betweenness = Eigen::VectorXd::Zero(N);

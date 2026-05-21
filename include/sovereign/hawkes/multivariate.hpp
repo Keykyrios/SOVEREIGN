@@ -61,9 +61,9 @@ class HawkesEngine {
     }
 
     void fit_sum_exp_to_powerlaw() {
-        double max_row_sum = 1.0;
+        double max_row_sum = 0.0;
         for (int i = 0; i < N_; ++i) {
-            double row_sum = 1.0;
+            double row_sum = 0.0;
             for (int j = 0; j < N_; ++j) {
                 if (i != j) row_sum += alpha_(i, j) / (cfg_.alpha_self + 1e-12);
             }
@@ -75,16 +75,21 @@ class HawkesEngine {
         // 10 log-spaced decay rates from 100 (fast) to 0.01 (slow)
         // Memory horizon: 1/beta_min = 100 time units
         double B_sum = 0;
+        double eps = cfg_.epsilon;  // Power-law tail index ∈ (0,1)
         for (int m = 0; m < N_EXP; ++m) {
             exp_beta_[m] = 100.0 * std::pow(0.01 / 100.0, (double)m / (N_EXP - 1));
-            exp_alpha_[m] = 1.0;  // temporary
-            B_sum += 1.0 / exp_beta_[m];
+            // Power-law weights: α_m ∝ β_m^{-ε} (Lima & Choi 1805.09570v3)
+            // This correctly approximates φ(t) = (1+t/β)^{-(1+ε)} via
+            // sum-of-exponentials, preserving true long-memory structure.
+            // Uniform weights (old code) degraded this to generic multi-exp decay.
+            exp_alpha_[m] = std::pow(exp_beta_[m], -eps);
+            B_sum += exp_alpha_[m] / exp_beta_[m];
         }
-        // Scale alphas so total branching = B_target
+        // Scale so total branching ratio = B_target
         double scale = B_target / B_sum;
         max_alpha_sum_ = 0;
         for (int m = 0; m < N_EXP; ++m) {
-            exp_alpha_[m] = scale;
+            exp_alpha_[m] *= scale;
             max_alpha_sum_ += exp_alpha_[m];
         }
 
@@ -256,17 +261,22 @@ public:
                     lambda_bar += aggregate_intensity(i, compute_excitation(i, t_cur));
                 }
             }
-            lambda_bar = std::max(lambda_bar, 1.0);
+            // FIX #15: Lower floor from 1.0 to 1e-6. The old floor wasted
+            // 10,000+ proposals per tick during low-activity periods.
+            lambda_bar = std::max(lambda_bar, 1e-6);
         }
     }
 
-    /// Modulate cross-asset excitation by graph distance
+    /// Modulate cross-asset excitation by graph distance.
+    /// FIX #16: Preserve Zipf cap_scale (1/√(i+1)) that was being erased.
     void modulate_by_graph(const Eigen::MatrixXd& graph_distance) {
-        for (int i = 0; i < N_; ++i)
+        for (int i = 0; i < N_; ++i) {
+            double cap_scale_i = 1.0 / std::sqrt(static_cast<double>(i + 1));
             for (int j = 0; j < N_; ++j)
                 if (i != j)
-                    alpha_(i, j) = cfg_.alpha_cross
+                    alpha_(i, j) = cfg_.alpha_cross * cap_scale_i
                                  * std::exp(-0.5 * graph_distance(i, j));
+        }
         projector_.dykstra_project(alpha_, beta_mat_, epsilon_mat_);
     }
 
@@ -284,9 +294,9 @@ public:
         double B_self = 0;
         for (int m = 0; m < N_EXP; ++m)
             B_self += exp_alpha_[m] / exp_beta_[m];
-        double max_row = 1.0;
+        double max_row = 0.0;
         for (int i = 0; i < N_; ++i) {
-            double row_sum = 1.0;
+            double row_sum = 0.0;
             for (int j = 0; j < N_; ++j) {
                 if (i != j) row_sum += alpha_(i, j) / (cfg_.alpha_self + 1e-12);
             }

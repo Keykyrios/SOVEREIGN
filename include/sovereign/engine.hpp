@@ -265,10 +265,11 @@ public:
             // ── Layer 5: Ruin dynamics ──────────────────────
             ruin_.step(state_, cfg_.dt, rng_);
 
-            // Update ruin_vector with local ruin_prob before contagion
-            for (int i = 0; i < N; ++i) {
-                state_.ruin_vector(i) = std::max(state_.ruin_vector(i), state_.assets[i].ruin_prob);
-            }
+            // FIX #33: Removed cwiseMax ratchet. The exponential blend in
+            // ruin_.step() (gerber_shiu.hpp line 218) governs both onset and
+            // recovery of the ruin signal. The old cwiseMax here was re-ratcheting
+            // the ruin_vector upward, contradicting the smooth blend's intent.
+            // Fast onset is already achieved by decay_rate=5.0 in the blend.
 
             // ── Layer 6: Topology (async dispatch) ────────────
             correlation_.record(state_);
@@ -317,6 +318,12 @@ public:
                     state_.distance = topo_result_.distance;
                     corr_chol_.compute(state_.correlation);
                     hawkes_.modulate_by_graph(graphs_.graph_distances());
+
+                    // FIX (Technical Debt): Connect TRI→θ feedback loop
+                    // As TRI (topological instability) rises, Market Makers increase
+                    // their ambiguity aversion (θ), widening spreads and draining liquidity.
+                    mm_.set_dynamic_theta(state_.tda_risk_index);
+
                     contagion_.invalidate_cache();
                     topo_result_.ready = false;
                 }
@@ -329,12 +336,15 @@ public:
             // Gamma -> Hawkes: mild boost to event intensity when ruin elevated
             // (ruin=1 -> 1.4x baseline, not 2.4x — prevents runaway cascade)
             for (int i = 0; i < N; ++i) {
-                double ruin_boost = 1.0 + 0.5 * std::max(state_.assets[i].ruin_prob - 0.5, 0.0);
+                // FIX (Technical Debt): Clarify ruin signal path.
+                // We intentionally read state_.ruin_vector(i) (the contagion-blended
+                // network ruin) rather than state_.assets[i].ruin_prob (the local
+                // actuarial ruin). This allows systemic risk to drive local panic.
+                double diffused_ruin = state_.ruin_vector(i);
+                double ruin_boost = 1.0 + 0.5 * std::max(diffused_ruin - 0.5, 0.0);
                 hawkes_.set_baseline_modulation(i, ruin_boost);
                 // DO NOT force regime — regime switching is purely stochastic
-                // via the Hawkes intensity in regime_.step(). Forcing regime
-                // based on ruin_prob inverts the feedback: low regime -> less
-                // jumps -> LESS mean-reversion -> price explosion -> more ruin.
+                // via the Hawkes intensity in regime_.step().
             }
 
             clock_.tick();

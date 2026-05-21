@@ -69,7 +69,8 @@ class RuinEngine {
         // Boundary: Φ(0) = w(0, 0) = 1 (simple penalty)
         phi[0] = 1.0;
 
-        // Picard iteration
+        // Gauss-Seidel iteration (uses current-iterate values for faster
+        // convergence than true Picard, which would use only previous-iterate).
         for (int iter = 0; iter < 50; ++iter) {
             std::vector<double> phi_new(N_GRID + 1, 0.0);
             phi_new[0] = 1.0;
@@ -89,9 +90,11 @@ class RuinEngine {
 
                 // IDE discretization: c·Φ'(u) - (λ+δ)Φ(u) + λ·conv + λ·ω = 0
                 // c·(Φ(u) - Φ(u-du))/du - (λ+δ)Φ(u) + λ·conv + λ·ω = 0
-                // Φ(u)·(c/du - (λ+δ)) = c·Φ(u-du)/du - λ·conv - λ·ω
+                // Φ(u)·(c/du - (λ+δ)) = -c·Φ(u-du)/du + λ·conv + λ·ω
+                // FIX: conv and ω are POSITIVE contributions to the IDE.
+                // Moving them to LHS when solving for Φ(u) keeps them positive.
                 double rhs = premium_rate * phi[i - 1] / du
-                           - claim_rate * conv - claim_rate * omega;
+                           + claim_rate * conv + claim_rate * omega;
                 double denom = premium_rate / du - (claim_rate + delta);
                 
                 // If denominator <= 0, process is structurally doomed (premium too low)
@@ -111,7 +114,7 @@ class RuinEngine {
             if (diff < 1e-8) return phi[N_GRID];
         }
 
-        // Divergence Fallback: Picard iteration failed to converge
+        // Divergence Fallback: Gauss-Seidel iteration failed to converge
         return 0.99;
     }
 

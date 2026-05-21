@@ -14,6 +14,7 @@
 #include <cmath>
 #include <vector>
 #include <numeric>
+#include <unordered_map>
 
 #ifdef SOVEREIGN_HAS_GUDHI
 #include <gudhi/Rips_complex.h>
@@ -97,11 +98,17 @@ class PersistenceEngine {
         };
         std::vector<long long> hashes(M);
         for(int i = 0; i < M; ++i) hashes[i] = hash_verts(simplices[i].vertices);
-        
+
+        // FIX #6: Use hash map for O(1) face lookup instead of O(M) linear scan.
+        // For N=50 dense graphs, the old linear scan was O(M²) ≈ 50 billion ops.
+        std::unordered_map<long long, int> hash_to_idx;
+        hash_to_idx.reserve(M);
+        for(int i = 0; i < M; ++i) hash_to_idx[hashes[i]] = i;
+
         auto find_face = [&](const std::vector<int>& v) -> int {
             long long h = hash_verts(v);
-            for(int i = M - 1; i >= 0; --i) if(hashes[i] == h) return i;
-            return -1;
+            auto it = hash_to_idx.find(h);
+            return (it != hash_to_idx.end()) ? it->second : -1;
         };
 
         std::vector<int> low(M, -1);

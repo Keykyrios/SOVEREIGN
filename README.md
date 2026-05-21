@@ -3,7 +3,7 @@
   <h1>SOVEREIGN</h1>
   <p><strong>S</strong>tochastic <strong>O</strong>rder-driven <strong>V</strong>olatility <strong>E</strong>ngine with <strong>R</strong>ecursive <strong>E</strong>ndogenous <strong>I</strong>nstability, <strong>G</strong>enerated <strong>N</strong>umerically</p>
 
-  <a href="https://drive.google.com/file/d/1RrAC7_fYjStJ_nXX5hUgOGOSytEOPVxq/view?usp=sharing"><strong>📄 Read the Whitepaper (Mathematical Specification)</strong></a>
+  <a href="https://drive.google.com/file/d/1UNPSa1la_3sS4537ieSWQfiYzWV3ZmJs/view?usp=sharing"><strong>📄 Read the Whitepaper (Mathematical Specification)</strong></a>
   <br /><br />
   <img src="https://img.shields.io/badge/C%2B%2B-20-00599C?style=for-the-badge&logo=c%2B%2B&logoColor=white" alt="C++20" />
   <img src="https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python" />
@@ -42,14 +42,10 @@ Each tick (default Δt = 10⁻⁴) executes in strict causal order:
 
 ```
 RuinEngine (Ψᵢ > 0.5) → HawkesEngine baseline modulation (1.0 + 0.5·max(Ψ-0.5, 0))
+RuinEngine (Γ vector, contagion-blended) → HawkesEngine (not local actuarial ruin)
 RuinEngine (Γ vector) → ContagionEngine (implicit Euler Laplacian diffusion)
 Topology results → HawkesEngine cross-excitation (α_ij *= exp(-0.5·d_graph))
-```
-
-### Feedback Loops (NOT Implemented)
-
-```
-TRI(t) → θ(t) = θ₀·exp(α·TRI)  [Layer 7 → Layer 4 ambiguity coupling — DESIGN TARGET ONLY]
+TRI(t) → θ(t) = θ₀·exp(α·TRI)  [Layer 7 → Layer 4, θ₀=0.5, α=0.1, clamped [0.1,10.0]]
 ```
 
 ---
@@ -62,7 +58,7 @@ TRI(t) → θ(t) = θ₀·exp(α·TRI)  [Layer 7 → Layer 4 ambiguity coupling 
 | **nlohmann/json** | any | Config deserialization (`NLOHMANN_DEFINE_TYPE_NON_INTRUSIVE_WITH_DEFAULT`) |
 | **Boost** | ≥ 1.74 | `boost::asio` for TCP telemetry socket |
 | **OpenMP** | optional | `#pragma omp parallel for` in price, LOB, impact loops |
-| **GUDHI** | optional | Persistent homology (currently **unreachable** — see Known Issues) |
+| **GUDHI** | optional | Persistent homology (available via `SOVEREIGN_USE_GUDHI=ON` — see Building) |
 
 ---
 
@@ -98,7 +94,7 @@ cmake --build . --config Release -j$(nproc)
 | Option | Default | Description |
 |--------|---------|-------------|
 | `SOVEREIGN_USE_OPENMP` | ON | Enable OpenMP parallelism |
-| `SOVEREIGN_USE_GUDHI` | OFF | Enable GUDHI (currently broken — see Known Issues) |
+| `SOVEREIGN_USE_GUDHI` | OFF | Enable GUDHI persistent cohomology backend (requires GUDHI installed) |
 | `SOVEREIGN_BUILD_TESTS` | OFF | Build unit tests |
 
 ---
@@ -151,6 +147,7 @@ Global: `correlation[N×N]`, `raw_correlation[N×N]`, `eigenvalues[N]`, `fiedler
 ### Rough Bergomi (Layer 1)
 - **12-factor Markovian approximation** of Volterra kernel K(t) = √(2H)·t^(H-1/2)
 - Decay rates λₖ log-spaced from 0.01 to 10,000
+- Weights: c_k = √(2H)·λ_k^(γ-1)·Δlog(λ)/Γ(γ) where γ = 1/2 - H (Abi Jaber & El Euch 2019)
 - Exact OU diffusion coefficient per factor (no Euler discretization error)
 - **Stochastic Hurst** OU process with reflection at [0.01, 0.99]
 - **Systemic market factor:** β=0.5 common factor injected before Cholesky
@@ -164,6 +161,7 @@ Global: `correlation[N×N]`, `raw_correlation[N×N]`, `eigenvalues[N]`, `fiedler
 ### Hawkes (Layer 2)
 - **N×5×10 dimensional** intensity (5 event types × 10 depth levels)
 - 10-component sum-of-exponentials with O(1) recursive update
+- **Power-law weights:** α_m ∝ β_m^{-ε} (ε=0.5, approximates φ(t)=(1+t/β)^{-(1+ε)})
 - Mark-weighted excitation: w = clamp(size/11, 0.1, 3.0)
 - **Dykstra spectral radius projection** (ρ(R) ≤ 0.95)
 - Zipf power-law heterogeneity: cap_scale = 1/√(i+1)
@@ -171,13 +169,13 @@ Global: `correlation[N×N]`, `raw_correlation[N×N]`, `eigenvalues[N]`, `fiedler
 ### LOB (Layer 3)
 - `Eigen::VectorXi` bid/ask volumes (M=500 levels per side)
 - Iceberg orders with **latency-gated revelation** (~5μs)
-- OU mid-price drift with tick-snapping (Regulation NMS sub-penny)
+- OU mid-price drift with tick-snapping (κ=100.0, tight tracking during flash crashes)
 - **√-concave impact:** ∑ sign(imbalance)·√|imbalance|·1/(1+d) over top 20 levels
 
 ### Market Maker (Layer 4)
 - 5 **ghost agents** per asset (no physical LOB orders)
-- Closed-form spread: δ* = (γ+θ)σ²|I|/2 + 2Ψ + floor
-- Background HJB on 30×30 grid with CFL-adaptive FTCS (dedicated thread)
+- Closed-form spread: δ* = (γ+θ(t))σ²|I|/2 + 2Ψ + floor, **θ(t)=θ₀·exp(α·TRI)** dynamic
+- Background HJB on 30×30 grid, dp=0.01 unified (CFL-adaptive FTCS, dedicated thread)
 - Avellaneda-Stoikov fill model: λ = 100·exp(-kδ - η|I|)
 - Self-Match Prevention (SMP)
 
@@ -185,20 +183,22 @@ Global: `correlation[N×N]`, `raw_correlation[N×N]`, `eigenvalues[N]`, `fiedler
 - Premium = spread × 200 fills/time
 - Claims on LOB stress (|impact|×10⁴ > 10.0) + Poisson background (0.05/yr)
 - Cramér-Lundberg ruin probability with exponential claims
-- Gerber-Shiu IDE: Picard iteration, 200-point grid, every 200 steps
+- Gerber-Shiu IDE: Gauss-Seidel iteration, 200-point grid, every 200 steps
+- Contagion blending via exponential decay (rate 5.0) to local ruin probability
 
 ### Topology (Layer 6)
 - EWMA α=0.005 with adaptive warm-up (first 2N samples)
-- Marčenko-Pastur cleaning with effective N_eff = min(2/α, t)
+- Marčenko-Pastur cleaning with effective N_eff = min(2/α, t), σ² from bottom-half spectrum
 - Higham alternating projections (50 iterations) for nearest correlation matrix
-- Prim's MST O(N²) + greedy PMFG approximation (no planarity test)
+- Prim's MST O(N²) + PMFG with Euler planarity filter (E≤3V-6) + common-neighbor face check
 - Fiedler eigenvalue, Brandes betweenness, local clustering
-- Implicit Euler Laplacian contagion diffusion (D=0.1)
+- Implicit Euler Laplacian contagion diffusion (D=0.1) with unified exp(-√(2(1-ρ))) weights
 
 ### TDA (Layer 7)
 - Vietoris-Rips filtration up to tetrahedra, ε_max = 2.0
-- Native Z₂ boundary matrix reduction (standard persistence algorithm)
+- Native Z₂ boundary matrix reduction with O(1) hash map face lookup
 - TRI = Σ (d-b)^p / (1+b), p=2.0 — heuristic, NOT L₁ norm
+- L^p landscape norms via trapezoidal quadrature
 - Greedy O(n²) Wasserstein-2 on H₁ pairs (upper bound)
 
 ---
@@ -216,25 +216,37 @@ Global: `correlation[N×N]`, `raw_correlation[N×N]`, `eigenvalues[N]`, `fiedler
 
 ## Known Issues & Technical Debt
 
-1. **GUDHI Build Bug:** `CMakeLists.txt` option `SOVEREIGN_USE_GUDHI` does not define the `SOVEREIGN_HAS_GUDHI` preprocessor macro. The GUDHI code path in `persistence.hpp` is unreachable. Fix: add `target_compile_definitions(sovereign_lib PUBLIC SOVEREIGN_HAS_GUDHI)` inside the GUDHI conditional.
+### Fixed in Current Version
 
-2. **TRI → θ Feedback Not Implemented:** The design target θ(t) = θ₀·exp(α·TRI(t)) coupling Layer 7 to Layer 4 is not connected. The ambiguity parameter θ remains static at 0.5.
+1. **Markovian kernel weights:** Corrected exponent from λ^γ to λ^(γ-1) per Abi Jaber & El Euch (2019).
+2. **CIR Alfonsi scheme:** Ito correction now uses `cfg_.cir_lambda` consistently.
+3. **CGMY small-jump mean:** Corrected to use `1-Y` exponent for Y∈(1,2) regime.
+4. **RMT σ² estimation:** Fixed to use bottom-half (noise) eigenvalues, not top-half (signal).
+5. **Gerber-Shiu IDE signs:** Corrected the IDE RHS — conv and ω are positive contributions.
+6. **Persistence face lookup:** O(M²) linear scan replaced with O(1) hash map.
+7. **Hawkes lambda_bar floor:** Lowered from 1.0 to 1e-6 to prevent wasted proposals.
+8. **Zipf cap_scale preservation:** `modulate_by_graph()` now preserves power-law heterogeneity.
+9. **Contagion/Spectral Laplacian unification:** Both now use exp(-√(2(1-ρ))) weighting.
+10. **Ruin cwiseMax ratchet:** Removed — exponential blend governs onset and recovery.
+11. **Distance matrix initialization:** Now arccos(identity) instead of all-zeros.
+12. **Landscape quadrature:** Trapezoidal rule (half-weight endpoints) instead of Riemann sum.
+13. **MLMC variance estimator:** Unbiased (/(n-1)) + Welford-style incremental update.
+14. **GUDHI Build Bug:** Fixed `CMakeLists.txt` to correctly define `SOVEREIGN_HAS_GUDHI`.
+15. **TRI → θ Feedback:** Connected the topological risk index to the market maker's ambiguity aversion.
+16. **PMFG Planarity:** Added Euler-formula planarity filter and common-neighbor checks.
+17. **Hawkes Weights:** Corrected uniform α_m to true power-law weights α_m ∝ β_m^{-ε}.
+18. **Variance Bias:** Added missing cross-factor covariances to the exact martingale compensator.
+19. **Dead Code Cleanup:** Removed unused `VolterraFBM`, `FBMGenerator`, `n_hybrid_steps`, and `kernels.hpp`.
+20. **HJB Grid Consistency:** Unified background worker and engine grid spacing to `dp=0.01`.
+21. **Ruin Signal Path:** Clarified that Hawkes feedback reads contagion-blended ruin, not local actuarial ruin.
+22. **LOB Price Lag:** Increased OU tracking speed from 1.0 to 100.0 for instant tracking during flash crashes.
 
-3. **Ghost Market Makers:** MMs evaluate spreads and simulate fills internally but never place physical limit orders into the LOB. Their bankruptcy does not remove visible liquidity.
+### Remaining Issues
 
-4. **PMFG Approximation:** The engine uses greedy edge enrichment without Boyer-Myrvold planarity testing. The resulting graph is not guaranteed to be genus-0 planar.
-
-5. **Uniform Hawkes Weights:** All 10 sum-of-exp components use uniform α_m, degrading true power-law long-memory into generic multi-exponential decay.
-
-6. **Diagonal Variance Compensator:** The Markovian fBm variance V(t) drops cross-factor covariances, introducing a small negative bias.
-
-7. **Legacy Dead Code:** `VolterraFBM` and `FBMGenerator` in `core/random.hpp` are complete but unused. Config parameter `n_hybrid_steps` is parsed but never read.
-
-8. **Orphaned MLMC:** `mc/mlmc.hpp` contains a complete multi-level Monte Carlo implementation (Giles 2008) but is never called by the engine.
-
-9. **No Native Calibration:** All parameters come from `default_config.json`. No MLE/GMM calibration pipeline exists.
-
-10. **Wasserstein Upper Bound:** The greedy O(n²) matching is an upper bound on optimal transport, not exact.
+1. **Ghost Market Makers:** MMs evaluate spreads and simulate fills internally but never place physical limit orders into the LOB.
+2. **Orphaned MLMC:** `mc/mlmc.hpp` contains a complete Giles (2008) multi-level Monte Carlo implementation but is never called by the engine.
+3. **No Native Calibration:** All parameters come from `default_config.json`. No MLE/GMM calibration pipeline exists.
+4. **Wasserstein Upper Bound:** The greedy O(n²) matching is an upper bound on optimal transport, not exact.
 
 ---
 
@@ -260,7 +272,8 @@ All parameters live in `config.hpp` as nested structs with `NLOHMANN_DEFINE_TYPE
 | `n_levels` | 500 | `LOBConfig` |
 | `n_market_makers` | 5 | `MarketMakerConfig` |
 | `gamma` | 2.0 | `MarketMakerConfig` |
-| `theta` | 0.5 | `MarketMakerConfig` |
+| `theta` | 0.5 | `MarketMakerConfig` (base; dynamic θ(t)=θ₀·exp(α·TRI) at runtime) |
+| `tri_alpha` | 0.1 | `MarketMakerConfig` (TRI→θ coupling strength) |
 | `ewma_alpha` | 0.005 | `TopologyConfig` |
 | `max_dimension` | 2 | `TDAConfig` |
 | `max_filtration` | 2.0 | `TDAConfig` |
@@ -282,15 +295,15 @@ SOVEREIGN/
 │   ├── engine.hpp                    # Main orchestrator (376 lines)
 │   ├── core/
 │   │   ├── clock.hpp                 # SimulationClock + Event priority queue
-│   │   ├── random.hpp                # Xoshiro256**, FBMGenerator, VolterraFBM (legacy)
+│   │   ├── random.hpp                # Xoshiro256** (dead FBMGenerator/VolterraFBM removed)
 │   │   └── state.hpp                 # AssetState, SimulationState
 │   ├── price/
 │   │   ├── rough_vol.hpp             # MarkovianFBM + RoughVolEngine
 │   │   ├── levy_jumps.hpp            # CGMYEngine + CIR subordinator
 │   │   └── regime.hpp                # RegimeEngine (5-state HMM)
 │   ├── hawkes/
-│   │   ├── multivariate.hpp          # HawkesEngine (N×5×10)
-│   │   ├── kernels.hpp               # PowerLawKernel, ExponentialKernel, SumExpKernel
+│   │   ├── multivariate.hpp          # HawkesEngine (N×5×10, power-law weights)
+│   │   ├── kernels.hpp               # Empty stub (dead code removed)
 │   │   └── stability.hpp             # Dykstra spectral radius projector
 │   ├── orderbook/
 │   │   └── lob.hpp                   # OrderBook + LOBEngine
@@ -300,7 +313,7 @@ SOVEREIGN/
 │   │   └── gerber_shiu.hpp           # RuinEngine + Cramér-Lundberg + Picard IDE
 │   ├── topology/
 │   │   ├── correlation.hpp           # EWMA + RMT + Higham
-│   │   ├── graphs.hpp                # Prim MST + PMFG approximation
+│   │   ├── graphs.hpp                # Prim MST + PMFG (Euler planarity filter)
 │   │   ├── spectral.hpp              # Fiedler + Brandes + clustering
 │   │   └── contagion.hpp             # Implicit Euler Laplacian diffusion
 │   ├── tda/

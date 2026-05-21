@@ -28,6 +28,7 @@ struct MMAgent {
 class MarketMakerEngine {
     const MarketMakerConfig& cfg_;
     int N_, M_;
+    double dynamic_theta_;  ///< TRI-modulated ambiguity: θ(t) = θ₀·exp(α·TRI)
     std::vector<std::vector<MMAgent>> agents_;
 
     // HJB grid per asset: V(inventory, price_dev)
@@ -146,14 +147,15 @@ class MarketMakerEngine {
             return std::max(cfg_.spread_floor, grid_delta + 2.0 * ruin);
         }
         // Fallback: closed-form
-        double geff = cfg_.gamma + cfg_.theta;
+        double geff = cfg_.gamma + dynamic_theta_;
         return std::max(cfg_.spread_floor,
             geff * vol * vol * std::abs(inv) * 0.5 + 2.0 * ruin);
     }
 
 public:
     MarketMakerEngine(const MarketMakerConfig& cfg, int n_assets)
-        : cfg_(cfg), N_(n_assets), M_(cfg.n_market_makers)
+        : cfg_(cfg), N_(n_assets), M_(cfg.n_market_makers),
+          dynamic_theta_(cfg.theta)
     {
         agents_.resize(N_);
         grids_.resize(N_);
@@ -183,7 +185,7 @@ public:
     void solve_hjb_step(int asset, double vol, double dt_total) {
         auto& g = grids_[asset];
         double di = 2.0 * g.inv_max / (g.ni - 1);
-        double dp = 0.2 / (g.np - 1);
+        double dp = 0.01;  // Unified with background HJB worker
 
         // CFL stability: dt_safe <= min(dp^2/vol^2, dp/|max_drift|)
         // Advection-diffusion combined CFL
@@ -308,6 +310,16 @@ public:
         }
         hjb_cv_.notify_one();
     }
+
+    /// TRI→θ feedback: θ(t) = θ₀·exp(α·TRI(t))
+    /// Called by Engine after topology worker returns fresh TRI.
+    void set_dynamic_theta(double tri) {
+        double theta_new = cfg_.theta * std::exp(cfg_.tri_alpha * tri);
+        // Clamp to prevent runaway: θ ∈ [0.1, 10.0]
+        dynamic_theta_ = std::clamp(theta_new, 0.1, 10.0);
+    }
+
+    double dynamic_theta() const { return dynamic_theta_; }
 };
 
 } // namespace sovereign

@@ -95,11 +95,22 @@ public:
 
     /// Exact analytic variance of the multi-factor OU process at time t.
     /// Used as the exact martingale compensator for the Rough Bergomi variance.
-    /// V(t) = Σ_k c_k^2 * (1 - exp(-2·λ_k·t)) / (2·λ_k)
+    /// V(t) = Σ_k c_k² · (1 - exp(-2λ_k·t)) / (2λ_k)
+    ///      + Σ_{j≠k} c_j·c_k · (1 - exp(-(λ_j+λ_k)·t)) / (λ_j+λ_k)
+    /// The cross-factor terms were previously dropped, causing a small
+    /// negative bias in the martingale compensator.
     double exact_variance(double t) const {
         double v = 0.0;
         for (int k = 0; k < N_FACTORS; ++k) {
-            v += (c_[k] * c_[k] / (2.0 * lambda_[k])) * (1.0 - std::exp(-2.0 * lambda_[k] * t));
+            // Diagonal terms
+            v += (c_[k] * c_[k] / (2.0 * lambda_[k]))
+               * (1.0 - std::exp(-2.0 * lambda_[k] * t));
+            // Cross-factor covariance terms (j < k, counted twice)
+            for (int j = 0; j < k; ++j) {
+                double lam_sum = lambda_[j] + lambda_[k];
+                v += 2.0 * (c_[j] * c_[k] / lam_sum)
+                   * (1.0 - std::exp(-lam_sum * t));
+            }
         }
         return v;
     }

@@ -21,8 +21,7 @@ def ewma(x, alpha=0.05):
         return x
     x = np.asarray(x, dtype=np.float64)
     n = len(x)
-    weights = (1 - alpha) ** np.arange(n - 1, -1, -1)
-    # cumsum trick: convolve with decaying weights via cumulative sum
+    # FIX #28: Removed dead `weights` array that was computed but never used.
     out = np.empty(n)
     out[0] = x[0]
     decay = 1.0 - alpha
@@ -45,8 +44,9 @@ class MarketTab(QWidget):
 
         self.pp = mkplot('Price Paths  P_i(t)', 'Step', 'Price ($)')
         self.pv = mkplot('Instantaneous Volatility  σ_i(t)', 'Step', 'σ')
-        self.ph = mkplot('Stochastic Hurst Exponent  H_i(t)', 'Step', 'H', yrange=(0, 0.5))
-        self.ph.enableAutoRange(axis='y', enable=False)  # Lock Y range to [0, 0.5]
+        # FIX #26: H can reach 0.99 via reflection boundaries. Old [0,0.5] clipped smooth-regime transitions.
+        self.ph = mkplot('Stochastic Hurst Exponent  H_i(t)', 'Step', 'H', yrange=(0, 1.0))
+        self.ph.enableAutoRange(axis='y', enable=False)  # Lock Y range to [0, 1.0]
         self.pr = mkplot('Ruin Probability  Γ_i(t)', 'Asset', 'Γ', yrange=(0, 1))
         self.bar_ruin = pg.BarGraphItem(x=[], height=[], width=0.7, brush=WARN)
         self.pr.addItem(self.bar_ruin)
@@ -250,8 +250,12 @@ class SurfaceTab(QWidget):
         xs = np.linspace(0, 10, T_MAX, dtype=np.float32)
         ys = np.linspace(0, 10, N, dtype=np.float32)
 
-        v_hist = self._vol_hist_np * 15.0
-        h_hist = self._hurst_hist_np * 20.0
+        # FIX #11: Normalize to [0, 10] range instead of magic multipliers (σ×15, H×20)
+        # that made the Z-axis values uninterpretable.
+        v_max = np.max(np.abs(self._vol_hist_np)) + 1e-12
+        h_max = np.max(np.abs(self._hurst_hist_np)) + 1e-12
+        v_hist = self._vol_hist_np / v_max * 10.0
+        h_hist = self._hurst_hist_np / h_max * 10.0
 
         Zv = v_hist.astype(np.float32)
         Zh = h_hist.astype(np.float32)
@@ -262,7 +266,9 @@ class SurfaceTab(QWidget):
         # Correlation manifold
         C = self.d.corr_matrix()
         xc = np.linspace(0, 10, N, dtype=np.float32)
-        Zc = C.astype(np.float32) * 5
+        # FIX #12: Correlation ∈ [-1,1]. Old Z*5 mapped to [-5,5], making negative
+        # correlations invisible below the Z=0 grid plane. Shift to [0,5].
+        Zc = ((C + 1.0) * 2.5).astype(np.float32)
         self._corr_surf = self._add_surf(self.gl_corr, self._corr_surf, Zc, xc, xc)
 
         # Eigenvalue spectrum
@@ -351,26 +357,33 @@ class TopologyTab(QWidget):
                     pos=self.pos3d, size=sizes, color=colors, pxMode=True)
                 self.glnet.addItem(self._nodes)
             else:
-                # 1 iteration of Fruchterman-Reingold physics
+                # FIX #13: Fruchterman-Reingold with temperature cooling.
+                # Without cooling, nodes oscillate forever. Temperature
+                # decays each frame to let the layout converge.
+                if not hasattr(self, '_temp'):
+                    self._temp = 1.0
+                self._temp *= 0.995
+                self._temp = max(self._temp, 0.01)
+
                 pos = self.pos3d
-                diff = pos[:, np.newaxis, :] - pos[np.newaxis, :, :] # (N, N, 3)
-                dist = np.linalg.norm(diff, axis=2) + 1e-5
+                diff = pos[:, np.newaxis, :] - pos[np.newaxis, :, :]  # (N, N, 3)
+                dist = np.linalg.norm(diff, axis=2) + 0.1  # Safe floor prevents 1/dist² blowup
                 
                 # Target resting lengths from actual mathematical distance matrix
                 D = self.d.dist_matrix()
                 target = D * 4.0 
                 
-                # Hooke's Law springs between all nodes
-                force = 0.05 * (target - dist)[..., np.newaxis] * (diff / dist[..., np.newaxis])
+                # Hooke's Law springs with temperature cooling
+                force = self._temp * 0.05 * (target - dist)[..., np.newaxis] * (diff / dist[..., np.newaxis])
                 
-                # Coulomb repulsion to spread them out
-                repulsion = 2.0 * (diff / dist[..., np.newaxis]) / (dist**2)[..., np.newaxis]
+                # Coulomb repulsion with safe denominator
+                repulsion = self._temp * 2.0 * (diff / dist[..., np.newaxis]) / (dist**2 + 0.01)[..., np.newaxis]
                 
                 disp = np.sum(force + repulsion, axis=1)
-                disp -= 0.05 * pos # weak gravity to origin
+                disp -= 0.05 * pos  # weak gravity to origin
                 
                 # Apply velocity with max speed limit
-                self.pos3d += np.clip(disp, -0.5, 0.5)
+                self.pos3d += np.clip(disp, -0.5 * self._temp, 0.5 * self._temp)
                 self._nodes.setData(pos=self.pos3d.astype(np.float32), size=sizes, color=colors)
 
         fts = ewma(self.d.ts('fiedler'), alpha=0.05)
@@ -410,9 +423,9 @@ class TDATab(QWidget):
                                          brush=pg.mkBrush(WARN+'aa'))
         self.ppers.addItem(self.sc_h0)
         self.ppers.addItem(self.sc_h1)
-        # Diagonal reference
-        self.ppers.plot([0,2],[0,2], pen=pg.mkPen('#334455',width=1,
-                                    style=Qt.PenStyle.DashLine))
+        # FIX #15v: Diagonal drawn dynamically each frame, not hardcoded to [0,2].
+        # Old code broke when max_filtration was changed in config.
+        self._diag_line = None
         # Auto-range: let the diagram scale to the actual persistence data
         self.ppers.enableAutoRange()
 
@@ -467,7 +480,17 @@ class TDATab(QWidget):
             if pairs:
                 births = np.array([p[0] for p in pairs])
                 deaths = np.array([p[1] for p in pairs])
-                self.sc_h0.setData(x=births, y=deaths)
+                # FIX #20: Filter by max_filtration to match C++ engine cutoff
+                max_filt = 2.0  # default cfg.tda.max_filtration
+                mask = deaths <= max_filt
+                self.sc_h0.setData(x=births[mask], y=deaths[mask])
+                # FIX #15v: Draw diagonal dynamically based on data range
+                diag_max = max(max_filt, float(np.max(deaths[mask])) if mask.any() else max_filt)
+                if self._diag_line is not None:
+                    self.ppers.removeItem(self._diag_line)
+                self._diag_line = self.ppers.plot(
+                    [0, diag_max], [0, diag_max],
+                    pen=pg.mkPen('#334455', width=1, style=Qt.PenStyle.DashLine))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -562,9 +585,13 @@ class CrisisTab(QWidget):
         xs = np.arange(len(fts))
         fts_clean = np.nan_to_num(fts, nan=float(N_assets))
 
-        # Fiedler: unnormalized Laplacian eigenvalue bounded by [0, N].
-        # Scale by N/2 to get [0, 1]. Plot (1 - scaled) so fragmentation spikes UP.
-        fiedler_norm = np.clip(fts_clean / (N_assets * 0.5), 0, 1)
+        # Fiedler: Use dynamic running max for normalization.
+        # FIX #14v: Old N/2 normalization was wrong for weighted Laplacian
+        # where edge weights exp(-d) can make Fiedler exceed N*0.5.
+        if not hasattr(self, '_fiedler_max'):
+            self._fiedler_max = 1.0
+        self._fiedler_max = max(self._fiedler_max, float(np.max(fts_clean)) + 1e-6)
+        fiedler_norm = np.clip(fts_clean / self._fiedler_max, 0, 1)
         self.cc_fi.setData(xs, 1.0 - fiedler_norm)
 
         # TRI: Use a fixed absolute scale (200) instead of dividing by moving max
@@ -576,11 +603,10 @@ class CrisisTab(QWidget):
 
         # Max Ruin across ALL assets (not just asset 0)
         if len(ruin):
+            # FIX #27: Rewritten to avoid allocating [0]*N_assets 100k times per frame.
             max_ruin_ts = np.array([
-                float(np.max([
-                    h.get('ruin_vector', [0] * N_assets)[j] if j < len(h.get('ruin_vector', [0] * N_assets))
-                    else 0 for j in range(N_assets)
-                ])) for h in d.hist
+                float(max(h.get('ruin_vector', [0.0]), default=0.0))
+                for h in d.hist
             ]) if d.hist else np.zeros(len(xs))
             if len(max_ruin_ts):
                 self.cc_ru.setData(np.arange(len(max_ruin_ts)), max_ruin_ts)

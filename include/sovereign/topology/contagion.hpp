@@ -32,9 +32,19 @@ public:
     /// Unconditionally stable — no CFL constraint on dt.
     void step(SimulationState& state, double dt) {
         if (!llt_valid_) {
-            // Build Laplacian from correlation
-            Eigen::MatrixXd W = state.correlation.cwiseMax(0.0);
-            for (int i = 0; i < N_; ++i) W(i, i) = 0;
+            // Build Laplacian from correlation — SAME weighting as SpectralEngine.
+            // FIX #9: Previously used W = max(ρ, 0), while spectral used
+            // W = exp(-√(2(1-ρ))). This made Fiedler describe a different graph
+            // than the one contagion actually spread over.
+            Eigen::MatrixXd W = Eigen::MatrixXd::Zero(N_, N_);
+            for (int i = 0; i < N_; ++i) {
+                for (int j = i + 1; j < N_; ++j) {
+                    double rho = std::clamp(state.correlation(i, j), -1.0, 1.0);
+                    double d = std::sqrt(std::max(2.0 * (1.0 - rho), 0.0));
+                    double w = std::exp(-d);
+                    W(i, j) = W(j, i) = w;
+                }
+            }
 
             Eigen::MatrixXd L = Eigen::MatrixXd::Zero(N_, N_);
             for (int i = 0; i < N_; ++i) {
