@@ -186,7 +186,7 @@ public:
             // This compensates BOTH large compound Poisson AND small Gaussian jumps.
             // We expand the 1.95 cap asymptotically for true divergence as Y->2.
             double safe_Y = std::min(cfg_.Y, 1.99); // Allow closer to 2.0 without complete Inf blowup
-            double neg_gamma_Y = 1.0 / (safe_Y * (safe_Y - 1.0)); // Γ(-Y) approx for Y∈(1,2)
+            double neg_gamma_Y = std::tgamma(2.0 - safe_Y) / (safe_Y * (safe_Y - 1.0)); // Γ(-Y) approx for Y∈(1,2)
             // Guard: G must be > 1 for (G-1)^Y to be real and positive
             double G_safe = std::max(cfg_.G, 1.01);
             double psi_neg1 = C_eff * neg_gamma_Y * (
