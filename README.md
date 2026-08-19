@@ -3,7 +3,7 @@
   <h1>SOVEREIGN</h1>
   <p><strong>S</strong>tochastic <strong>O</strong>rder-driven <strong>V</strong>olatility <strong>E</strong>ngine with <strong>R</strong>ecursive <strong>E</strong>ndogenous <strong>I</strong>nstability, <strong>G</strong>enerated <strong>N</strong>umerically</p>
 
-  <a href="https://drive.google.com/file/d/1YIOklz82BnywGOdqOaRihj8NBXZYgv3e/view?usp=sharing"><strong>📄 Read the Whitepaper (Mathematical Specification)</strong></a>
+  <a href="https://drive.google.com/drive/u/0/folders/1VdiBC7ijt8NYdPndfwThRduXn03N2m4R"><strong>📄 Read the Whitepaper (Mathematical Specification)</strong></a>
   <br /><br />
   <img src="https://img.shields.io/badge/C%2B%2B-20-00599C?style=for-the-badge&logo=c%2B%2B&logoColor=white" alt="C++20" />
   <img src="https://img.shields.io/badge/Python-3.10+-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python" />
